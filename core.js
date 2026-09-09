@@ -4,10 +4,14 @@ const own = (value, key) => value !== null && typeof value === 'object'
     && Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-export const DEFAULT_DIALOGUE_PROMPT = '# Dialogue Format\n- Output all dialogue as: `Speaker Name | "Dialogue"`\n- Add a blank line after each line.';
+const LEGACY_DIALOGUE_PROMPT = '# Dialogue Format\n- Output all dialogue as: `Speaker Name | "Dialogue"`\n- Add a blank line after each line.';
+export const DEFAULT_DIALOGUE_PROMPT = '# Dialogue Format\n\n- Output all dialogue as: `Speaker Name | "Dialogue"`\n- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.\n- Add a blank line after each line.';
+export const DEFAULT_DIALOGUE_PROMPT_B = '# Dialogue Format\n\n- Format: `Speaker Name | "Dialogue"`\n- Non-Korean speech = preserve the spoken language and append a Korean translation: `Speaker Name | "Original" (Korean translation)`\n- Keep original-language dialogue natural to the character\'s linguistic/cultural background, not literal Korean phrasing.\n- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.\n- Add a blank line after each line.';
 export const DEFAULT_SETTINGS = Object.freeze({
     dialoguePromptEnabled: false,
     dialoguePrompt: DEFAULT_DIALOGUE_PROMPT,
+    dialoguePromptPreset: 'A',
+    dialoguePrompts: Object.freeze({ A: DEFAULT_DIALOGUE_PROMPT, B: DEFAULT_DIALOGUE_PROMPT_B }),
     version: 1,
     enabled: true,
     namePosition: 'none',
@@ -158,9 +162,20 @@ export function sanitizeSettings(input) {
     const boolean = (key, fallback) => typeof own(source, key) === 'boolean' ? own(source, key) : fallback;
     const design = own(source, 'design');
     const shape = own(source, 'shape');
+    const storedPrompt = own(source, 'dialoguePrompt');
+    const legacyPrompt = typeof storedPrompt === 'string' && storedPrompt.trim() !== LEGACY_DIALOGUE_PROMPT
+        ? storedPrompt.slice(0, 8000) : DEFAULT_DIALOGUE_PROMPT;
+    const slots = own(source, 'dialoguePrompts');
+    const dialoguePromptPreset = own(source, 'dialoguePromptPreset') === 'B' ? 'B' : 'A';
+    const dialoguePrompts = {
+        A: typeof own(slots, 'A') === 'string' ? own(slots, 'A').slice(0, 8000) : legacyPrompt,
+        B: typeof own(slots, 'B') === 'string' ? own(slots, 'B').slice(0, 8000) : DEFAULT_DIALOGUE_PROMPT_B,
+    };
     const settings = {
+        dialoguePromptPreset,
+        dialoguePrompts,
         dialoguePromptEnabled: boolean('dialoguePromptEnabled', false),
-        dialoguePrompt: typeof own(source,'dialoguePrompt') === 'string' ? own(source,'dialoguePrompt').slice(0,8000) : DEFAULT_DIALOGUE_PROMPT,
+        dialoguePrompt: dialoguePrompts[dialoguePromptPreset],
         version: 1,
         enabled: boolean('enabled', true),
         namePosition: own(source, 'namePosition') === 'above' && own(source, 'showName') !== false ? 'above' : 'none',
@@ -199,6 +214,8 @@ export function sanitizeSettings(input) {
             id,
             name,
             aliases,
+            enabled: own(entry, 'enabled') !== false,
+            hideWhenMasked: own(entry, 'hideWhenMasked') === true,
             image: safeImage(own(entry, 'image')),
             zoom: boundedNumber(own(entry, 'zoom'), 1, 3, 1.25),
             x: boundedNumber(own(entry, 'x'), 0, 100, 50),

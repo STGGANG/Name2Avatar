@@ -1,19 +1,53 @@
-import { parseDialogueLine, resolveSpeaker, dialoguePrefix } from './core.js';
+import { parseDialogueLine, resolveSpeaker, dialoguePrefix, normalizeName } from './core.js?v=1.0.1';
 import { applyTypography } from './typography.js';
 
 const EXCLUDED='pre,code,style,script,textarea,iframe,svg,table,details,.mg-status,.speakers,.sp-line,[data-sp-skip]';
 const INLINE=new Set(['A','ABBR','B','BDI','BDO','CITE','DEL','EM','I','MARK','Q','S','SMALL','SPAN','STRONG','SUB','SUP','U']);
 
-export function makeAvatar(name, image, crop={}) {
+function bindAvatarImage(img){
+  img.addEventListener('error',()=>{
+    // A failed ST thumbnail must not stay as initials because of a cached failure.
+    if(img.dataset.spThumbnail==='true'&&img.dataset.spRetried!=='true'){
+      const url=new URL(img.src,document.baseURI);
+      if(url.origin===location.origin&&url.pathname.endsWith('/thumbnail')){
+        img.dataset.spRetried='true';url.searchParams.set('t',String(Date.now()));
+        img.src=url.href;return;
+      }
+    }
+    img.remove();
+  });
+}
+
+export function makeAvatar(name, image, crop={}, masked=false) {
   const avatar=document.createElement('span');
   avatar.className='sp-avatar';
+  if(crop.hideWhenMasked===true)avatar.dataset.spMask='true';
   avatar.setAttribute('aria-hidden','true');
+  if(masked){
+    // Use real SVG content: cached styles or theme pseudo-elements cannot expose initials.
+    avatar.dataset.spMasked='true';
+    avatar.style.setProperty('background','#e5e5e5','important');
+    avatar.style.setProperty('border-color','#d0d0d0','important');
+    const ns='http://www.w3.org/2000/svg';
+    const icon=document.createElementNS(ns,'svg');
+    icon.setAttribute('viewBox','0 0 48 48');icon.setAttribute('focusable','false');
+    for(const [key,value] of Object.entries({display:'block',position:'absolute',inset:'0',width:'100%',height:'100%',margin:'0',padding:'0',transform:'none'}))icon.style.setProperty(key,value,'important');
+    const backdrop=document.createElementNS(ns,'rect');
+    backdrop.setAttribute('width','48');backdrop.setAttribute('height','48');backdrop.style.setProperty('fill','#e5e5e5','important');
+    const head=document.createElementNS(ns,'circle');
+    head.setAttribute('cx','24');head.setAttribute('cy','17');head.setAttribute('r','6');
+    const shoulders=document.createElementNS(ns,'path');shoulders.setAttribute('d','M12 37v-3c0-11 24-11 24 0v3z');
+    for(const part of [head,shoulders])part.style.setProperty('fill','#a3a3a3','important');
+    icon.append(backdrop,head,shoulders);avatar.append(icon);
+    return avatar;
+  }
   avatar.textContent=Array.from(name).slice(0,2).join('');
   if(image){
     const img=document.createElement('img');
     img.alt=''; img.src=image; img.draggable=false;
+    if(crop.photoSource)img.dataset.spThumbnail='true';
     applyCrop(img,crop);
-    img.addEventListener('error',()=>img.remove(),{once:true});
+    bindAvatarImage(img);
     avatar.append(img);
   }
   return avatar;
@@ -69,7 +103,7 @@ function afterPrefix(fragment) {
 }
 
 /** Only changes rendered DOM; original nodes stay available for exact restoration. */
-export function createRenderer({getSettings,getSources,getImage}) {
+export function createRenderer({getSettings,getSources,getImage,getMaskState=()=>false}) {
   const originals=new WeakMap();
   const grouped=new WeakMap();
   function ungroup(root){
@@ -103,7 +137,7 @@ export function createRenderer({getSettings,getSources,getImage}) {
         speech.append(first.querySelector('.sp-words'));
         for(const entry of run.slice(1))speech.append(entry.line.querySelector('.sp-words').cloneNode(true));
         body.append(speech);group.append(first);
-        for(const img of first.querySelectorAll('img'))img.addEventListener('error',()=>img.remove(),{once:true});
+        for(const img of first.querySelectorAll('img'))bindAvatarImage(img);
         const original=document.createDocumentFragment();
         const end=run.at(-1).node.nextSibling;
         let current=run[0].node;current.before(group);
@@ -139,14 +173,16 @@ export function createRenderer({getSettings,getSources,getImage}) {
     }
     if(!parsed)return;
     const result=resolveSpeaker(parsed.name,sources);
-    // Unregistered/ambiguous speakers retain their original text and theme.
-    if(result?.kind!=='profile')return;
-    const crop=result.profile;
-    const image=getImage(result);
+    // Disabled registrations retain the original dialogue, including local overrides.
+    if(result?.kind==='ambiguous'||result?.profile?.enabled===false)return;
+    const crop=result?.profile??{};
+    const masked=crop.hideWhenMasked===true&&getMaskState();
+    const image=!masked&&result?.kind==='profile'?getImage(result):'';
     const wrapper=document.createElement('span');
     wrapper.className='sp-line';decorateLine(wrapper,settings);
-    wrapper.dataset.speaker=parsed.name;wrapper.dataset.person=result.profile.id;
-    if(!image)wrapper.title='등록된 이미지 없음';
+    wrapper.dataset.speaker=parsed.name;
+    wrapper.dataset.person=result?.kind==='profile'?`profile:${result.profile.id}`:`name:${normalizeName(parsed.name)}`;
+    if(!image)wrapper.title=parsed.name;
     const body=document.createElement('span');body.className='sp-body';
     const name=document.createElement('span');name.className='sp-name';name.textContent=parsed.name;
     const content=document.createElement('span');content.className='sp-words';
@@ -154,7 +190,7 @@ export function createRenderer({getSettings,getSources,getImage}) {
     for(const node of nodes)copy.append(node.cloneNode(true));
     content.append(afterPrefix(copy));
     if(settings.quoteStyle==='override')resetQuotes(content);
-    body.append(name,content);wrapper.append(makeAvatar(parsed.name,image,crop),body);
+    body.append(name,content);wrapper.append(makeAvatar(parsed.name,image,crop,masked),body);
     applyTypography(wrapper,settings);
     nodes[0].before(wrapper);
     const original=document.createDocumentFragment();

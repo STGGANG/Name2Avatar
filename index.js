@@ -1,7 +1,7 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, normalizeName, parseNames, isServerImage } from './core.js';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.0.1';
 import { syncDialoguePrompt } from './prompt.js';
-import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js';
+import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.0.1';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.0.1';
 import { bindCropDrag } from './crop.js';
 import { FONT_OPTIONS, applyTypography } from './typography.js';
 import {uploadPortrait,portableImage} from './server-images.js';
@@ -12,6 +12,7 @@ const ctx=()=>SillyTavern.getContext();
 const uid=()=>globalThis.crypto?.randomUUID?.()??`sp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let store,storageId,panel,draft=null,original=null,activeScope=null,renderer,observer,timer;
 let needsReset=false,imagesReady=false,saveQueue=Promise.resolve();
+let portraitsHidden=false;
 
 const database=new Promise((resolve,reject)=>{
   const request=indexedDB.open('st-speaker-portraits',1);
@@ -45,6 +46,10 @@ function message(text,error=false){
   const status=panel?.querySelector('.sp-message');
   if(status){status.textContent=text;status.dataset.error=String(error);}
 }
+function refreshPortraitMask(){
+  const checkbox=panel?.querySelector('[data-hide-portraits]');
+  if(checkbox)checkbox.checked=portraitsHidden;
+}
 /** Serialize mutations against the latest committed store, not a stale UI snapshot. */
 function persist(update,uploadIds=[]){
   const operation=saveQueue.catch(()=>{}).then(async()=>{
@@ -70,7 +75,12 @@ function persist(update,uploadIds=[]){
 }
 function refreshUI(){
   if(!panel)return;
+  refreshPortraitMask();
   panel.querySelector('[data-prompt-enabled]').checked=store.dialoguePromptEnabled;
+  for(const button of panel.querySelectorAll('[data-prompt-preset]')){
+    const selected=button.dataset.promptPreset===store.dialoguePromptPreset;
+    button.setAttribute('aria-pressed',String(selected));button.classList.toggle('sp-primary',selected);
+  }
   for(const [selector,key,boolean] of [
     ['[data-enabled]','enabled',true],
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
@@ -98,12 +108,13 @@ function observe(){
 }
 function schedule(reset=false){
   needsReset=needsReset||reset;clearTimeout(timer);
-  timer=setTimeout(()=>{
-    observer.disconnect();
-    try{for(const root of document.querySelectorAll('#chat .mes_text'))renderer.render(root,{reset:needsReset});}
-    catch(error){console.error('[Name2Avatar] 표시 오류',error);}
-    finally{needsReset=false;observe();}
-  },90);
+  timer=setTimeout(renderChat,90);
+}
+function renderChat(){
+  observer.disconnect();
+  try{for(const root of document.querySelectorAll('#chat .mes_text'))renderer.render(root,{reset:needsReset});}
+  catch(error){console.error('[Name2Avatar] 표시 오류',error);}
+  finally{needsReset=false;observe();}
 }
 function syncCrop(){
   if(!draft)return;
@@ -141,11 +152,32 @@ function library(){
   }
   for(const {person,scope} of entries){
     const row=document.createElement('div');row.className='sp-profile-row';
+    row.dataset.enabled=String(person.enabled!==false);
     const info=document.createElement('span');info.className='sp-profile-info';
     const names=document.createElement('b');names.textContent=[person.name,...person.aliases].join(', ');names.title=names.textContent;
     const badge=document.createElement('small');badge.textContent=scope?`현재 ${scope.key.startsWith('group:')?'그룹':'봇'} 전용`:'모든 봇 공통 적용';
+    if(person.hideWhenMasked)badge.textContent+=' · 가리기 대상';
     info.append(names,badge);
     const actions=document.createElement('span');actions.className='sp-row-actions';
+    const toggle=document.createElement('button');toggle.type='button';toggle.className='sp-person-toggle';
+    toggle.setAttribute('role','switch');toggle.setAttribute('aria-checked',String(person.enabled!==false));
+    toggle.setAttribute('aria-label',`${person.name} ${scope?'전용':'공통'} 프로필 표시`);
+    toggle.title='끄면 이 인물의 대사를 원래 텍스트로 표시합니다.';
+    toggle.textContent=person.enabled===false?'OFF':'ON';
+    toggle.onclick=async()=>{
+      const enabled=person.enabled===false;toggle.disabled=true;
+      try{
+        await persist(current=>{
+          const next=structuredClone(current);
+          const settings=scope?next.scopes.find(entry=>entry.key===scope.key)?.settings:next;
+          const profile=settings?.profiles.find(entry=>entry.id===person.id);
+          if(profile)profile.enabled=enabled;
+          return next;
+        });
+        message('');
+      }catch(error){message(error.message,true);refreshUI();}
+    };
+    actions.append(toggle);
     const edit=document.createElement('button');edit.type='button';edit.textContent='편집';
     edit.setAttribute('aria-label',`${person.name} ${scope?'전용':'공통'} 편집`);edit.onclick=()=>editPerson(person,scope);actions.append(edit);
     row.append(makeAvatar(person.name,profileImage(person),person),info,actions);list.append(row);
@@ -168,6 +200,7 @@ function editPerson(person,scope=null){
   draft=person?structuredClone(person):{id:uid(),name:'',aliases:[],image:'',zoom:1.25,x:50,y:35};
   panel.querySelector('.sp-editor').hidden=false;
   panel.querySelector('[data-names]').value=[draft.name,...draft.aliases].filter(Boolean).join(', ');
+  panel.querySelector('[data-mask-person]').checked=draft.hideWhenMasked===true;
   const select=panel.querySelector('[data-person-scope]');
   select.options[1].disabled=!activeScope;
   select.options[1].textContent=activeScope?`${activeScope.key.startsWith('group:')?'현재 그룹':'현재 봇'} 전용 · ${activeScope.label}`:'현재 봇 전용 (봇 선택 필요)';
@@ -192,7 +225,11 @@ async function saveProfile(){
   const savedDraft=draft,from=original;
   const person={...structuredClone(draft),name:names[0],aliases:names.slice(1)};
   try{
-    await persist(current=>savePerson(current,person,target,from),[person.id]);
+    await persist(current=>{
+      // A list toggle may have changed while this editor was open.
+      const latest=from?allProfiles(current).find(entry=>entry.id===from.id):null;
+      return savePerson(current,{...person,enabled:latest?.enabled??person.enabled??true},target,from);
+    },[person.id]);
     if(draft===savedDraft)closeEditor();message(`${target?target.label+' 전용으로':'모든 봇 공통 적용으로'} 저장했어요.`);
   }catch(error){message(`저장하지 못했어요: ${error.message}`,true);}
 }
@@ -270,10 +307,11 @@ function mount(){
       <label class="sp-check"><input type="checkbox" data-prompt-enabled> 대사 형식 프롬 적용</label>
       <p class="sp-muted">켜면 저장된 내용을 다음 AI 요청부터 대화 끝부분에 전달합니다. 확장 비활성화 시에는 전달하지 않습니다.</p>
       <label class="sp-field">프롬프트<textarea data-prompt-text rows="5" maxlength="8000" aria-label="대사 형식 프롬프트"></textarea></label>
-      <div class="sp-toolbar"><button type="button" data-prompt-save>프롬프트 저장</button><button type="button" data-prompt-reset>기본값으로 초기화</button></div>
+      <div class="sp-toolbar"><button type="button" data-prompt-preset="A" aria-pressed="true">프롬A</button><button type="button" data-prompt-preset="B" aria-pressed="false">프롬B</button><button type="button" data-prompt-save>저장</button><button type="button" data-prompt-reset>초기화</button></div>
+      <p class="sp-muted">선택한 프롬프트를 사용합니다. 저장·초기화는 선택한 칸에만 적용됩니다.</p>
     </div></details>
     <h4>전체 설정</h4>
-    <label class="sp-check"><input type="checkbox" data-enabled> 확장 활성화</label>
+    <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-enabled> 확장 활성화</label><label class="sp-check" title="체크를 해제하거나 새로고침하면 원래 프사로 돌아옵니다."><input type="checkbox" data-hide-portraits> 지정 인물 프사만 가리기</label></div>
     <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
     <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
     <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
@@ -296,6 +334,8 @@ function mount(){
       <p class="sp-muted" id="sp-names-help">쉼표로 구분해 주세요. 대사 앞에 해당 이름이 나오면 사진으로 대체 표시합니다. 첫 이름은 목록의 대표 이름이에요.</p>
       <label class="sp-field">이 인물의 적용 범위<select data-person-scope><option value="global">모든 봇 공통 적용</option><option value="local">현재 봇 전용</option></select></label>
       <p class="sp-muted" data-person-scope-note></p>
+      <label class="sp-check"><input type="checkbox" data-mask-person> '지정 인물 프사만 가리기' 적용 대상</label>
+      <p class="sp-muted">체크하고 저장하면 '지정 인물 프사만 가리기' 를 눌렀을 때 이 인물의 대사 프사가 아이콘으로 바뀝니다.</p>
       <div class="sp-toolbar"><button type="button" data-upload>사진 넣기</button><button type="button" data-clear-image>사진 지우기</button><span class="sp-muted">PNG · JPG · WebP</span></div>
       <div class="sp-toolbar"><select data-source aria-label="ST 사진 선택"></select></div>
       <div class="sp-crop-stage"></div>
@@ -312,6 +352,10 @@ function mount(){
     <input type="file" data-image-file accept="image/png,image/jpeg,image/webp" hidden><input type="file" data-backup-file accept="application/json,.json" hidden>
   </div></div></div>`;
   container.append(panel);
+  panel.querySelector('[data-hide-portraits]').onchange=event=>{
+    portraitsHidden=event.target.checked;
+    clearTimeout(timer);needsReset=true;renderChat();
+  };
   panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;
   panel.querySelector('[data-prompt-enabled]').onchange=async event=>{
     if(event.target.checked&&typeof ctx().setExtensionPrompt!=='function'){
@@ -320,13 +364,23 @@ function mount(){
     try{const enabled=event.target.checked;await persist(current=>({...current,dialoguePromptEnabled:enabled}));message('');}
     catch(error){message(error.message,true);refreshUI();}
   };
+  for(const button of panel.querySelectorAll('[data-prompt-preset]'))button.onclick=async()=>{
+    const preset=button.dataset.promptPreset;
+    try{
+      await persist(current=>({...current,dialoguePromptPreset:preset}));
+      panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;
+      message('');
+    }catch(error){message(error.message,true);}
+  };
   panel.querySelector('[data-prompt-save]').onclick=async()=>{
     const value=panel.querySelector('[data-prompt-text]').value;
-    try{await persist(current=>({...current,dialoguePrompt:value}));message('프롬프트를 저장했어요.');}
+    const preset=store.dialoguePromptPreset;
+    try{await persist(current=>({...current,dialoguePrompts:{...current.dialoguePrompts,[preset]:value}}));message(`프롬${preset}에 저장했어요.`);}
     catch(error){message(error.message,true);}
   };
   panel.querySelector('[data-prompt-reset]').onclick=async()=>{
-    try{await persist(current=>({...current,dialoguePrompt:DEFAULT_DIALOGUE_PROMPT}));panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;message('');}
+    const preset=store.dialoguePromptPreset,value=preset==='B'?DEFAULT_DIALOGUE_PROMPT_B:DEFAULT_DIALOGUE_PROMPT;
+    try{await persist(current=>({...current,dialoguePrompts:{...current.dialoguePrompts,[preset]:value}}));panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;message('');}
     catch(error){message(error.message,true);}
   };
   const header=panel.querySelector('.inline-drawer-header'),content=panel.querySelector('.inline-drawer-content');
@@ -352,6 +406,7 @@ function mount(){
   panel.querySelector('[data-add]').onclick=()=>editPerson();
   panel.querySelector('[data-cancel]').onclick=closeEditor;
   panel.querySelector('[data-person-scope]').onchange=scopeHint;
+  panel.querySelector('[data-mask-person]').onchange=event=>{if(draft)draft.hideWhenMasked=event.target.checked;};
   panel.querySelector('[data-names]').oninput=event=>{if(draft){const names=parseNames(event.target.value);draft.name=names[0]??'';draft.aliases=names.slice(1);preview();}};
   panel.querySelector('[data-save]').onclick=saveProfile;
   for(const range of panel.querySelectorAll('[data-crop]'))range.oninput=()=>{if(draft){draft[range.dataset.crop]=Number(range.value);syncCrop();}};
@@ -390,7 +445,7 @@ async function initialize(){
   try{const images=await imageStore();for(const person of allProfiles(store))person.image=person.photoSource?'':isServerImage(person.image)?person.image:(images[person.id]??person.image??'');store=sanitizeStore(store);imagesReady=true;}
   catch{imagesReady=allProfiles(store).every(p=>isServerImage(p.image)||p.photoSource);if(!imagesReady)storageError='기존 브라우저 사진을 읽지 못했어요. 원래 브라우저의 저장소를 확인해 주세요.';}
   if(!ctx().extensionSettings[KEY]?.storageId){ctx().extensionSettings[KEY]={...store,storageId};ctx().saveSettingsDebounced();}
-  renderer=createRenderer({getSettings:()=>store,getSources,getImage:result=>profileImage(result?.profile)});
+  renderer=createRenderer({getSettings:()=>store,getSources,getImage:result=>profileImage(result?.profile),getMaskState:()=>portraitsHidden});
   observer=new MutationObserver(()=>schedule());
   if(document.readyState==='loading')await new Promise(resolve=>document.addEventListener('DOMContentLoaded',resolve,{once:true}));
   mount();if(storageError)message(storageError,true);
