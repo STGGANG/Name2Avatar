@@ -301,7 +301,7 @@ function mount(){
   panel.innerHTML=`<div class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header" role="button" tabindex="0" aria-expanded="false" aria-controls="sp-drawer-content"><b>이름 ➡ 프사</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></div></div>
     <div class="inline-drawer-content" id="sp-drawer-content"><div class="sp-panel">
-    <div><h3>Name2Avatar</h3><p class="sp-muted">등록한 이름에, 원하는 사진을.</p></div>
+    <div class="sp-title-row"><h3>Name2Avatar</h3><p class="sp-muted">등록한 이름에, 원하는 사진을.</p></div>
     <details class="sp-font-settings"><summary>대사 형식 · 프롬프트</summary><div class="sp-font-panel">
       <p class="sp-muted">지원 형식: 이름 | "대사" · 이름: "대사" · [이름] "대사"<br>대사 뒤의 (번역·생각)이나 굵은 글씨도 유지합니다. 한 줄에 한 인물의 대사를 써 주세요.</p>
       <label class="sp-check"><input type="checkbox" data-prompt-enabled> 대사 형식 프롬 적용</label>
