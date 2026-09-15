@@ -1,7 +1,8 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.0.1';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.0.1-depth';
 import { syncDialoguePrompt } from './prompt.js';
 import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.0.1';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.0.1';
+import { createChatRenderer } from './chat-renderer.js';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.0.1-depth';
 import { bindCropDrag } from './crop.js';
 import { FONT_OPTIONS, applyTypography } from './typography.js';
 import {uploadPortrait,portableImage} from './server-images.js';
@@ -10,7 +11,7 @@ import {uploadPortrait,portableImage} from './server-images.js';
 const KEY='speaker_portraits_v1';
 const ctx=()=>SillyTavern.getContext();
 const uid=()=>globalThis.crypto?.randomUUID?.()??`sp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-let store,storageId,panel,draft=null,original=null,activeScope=null,renderer,observer,timer;
+let store,storageId,panel,draft=null,original=null,activeScope=null,renderer,chatRenderer,observer,timer=null;
 let needsReset=false,imagesReady=false,saveQueue=Promise.resolve();
 let portraitsHidden=false;
 
@@ -51,7 +52,7 @@ function refreshPortraitMask(){
   if(checkbox)checkbox.checked=portraitsHidden;
 }
 /** Serialize mutations against the latest committed store, not a stale UI snapshot. */
-function persist(update,uploadIds=[]){
+function persist(update,uploadIds=[],reset=true){
   const operation=saveQueue.catch(()=>{}).then(async()=>{
     if(!imagesReady)throw new Error('사진 저장소를 읽지 못해 저장을 중단했어요. 브라우저 저장소를 확인한 뒤 새로고침해 주세요.');
     const clean=sanitizeStore(update(store));
@@ -68,7 +69,7 @@ function persist(update,uploadIds=[]){
     if(Object.keys(images).length)await imageStore({...await imageStore(),...images});
     ctx().extensionSettings[KEY]=metadata;
     ctx().saveSettingsDebounced();
-    store=clean;syncDialoguePrompt(ctx(),store);refreshUI();schedule(true);
+    store=clean;syncDialoguePrompt(ctx(),store);refreshUI();schedule(reset);
   });
   saveQueue=operation;
   return operation;
@@ -83,6 +84,7 @@ function refreshUI(){
   }
   for(const [selector,key,boolean] of [
     ['[data-enabled]','enabled',true],
+    ['[data-render-depth]','renderDepth'],
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
     ['[data-font-mode]','fontMode'],['[data-name-font]','nameFont'],['[data-dialogue-font]','dialogueFont'],
     ['[data-color-enabled]','quoteColorEnabled',true],['[data-quote-color]','quoteColor'],
@@ -100,19 +102,24 @@ function changeContext(){
   const next=getActiveScope(ctx());
   const changed=(next?.key??'')!==(activeScope?.key??'');activeScope=next;
   if(changed&&draft){closeEditor();message('봇이 바뀌어 저장 전 편집을 닫았어요. 다시 이름을 선택해 주세요.');}
-  refreshUI();schedule(true);
+  refreshUI();schedule(changed);
 }
 function observe(){
   const chat=document.getElementById('chat');
   if(chat)observer.observe(chat,{childList:true,subtree:true,characterData:true});
 }
 function schedule(reset=false){
-  needsReset=needsReset||reset;clearTimeout(timer);
-  timer=setTimeout(renderChat,90);
+  needsReset=needsReset||reset;
+  if(timer===null)timer=requestAnimationFrame(renderChat);
 }
 function renderChat(){
+  timer=null;
+  chatRenderer.markMutations(observer.takeRecords());
   observer.disconnect();
-  try{for(const root of document.querySelectorAll('#chat .mes_text'))renderer.render(root,{reset:needsReset});}
+  try{chatRenderer.render(document.getElementById('chat'),{
+    depth:store.renderDepth,totalMessages:Array.isArray(ctx().chat)?ctx().chat.length:null,
+    enabled:store.enabled,reset:needsReset,
+  });}
   catch(error){console.error('[Name2Avatar] 표시 오류',error);}
   finally{needsReset=false;observe();}
 }
@@ -312,6 +319,8 @@ function mount(){
     </div></details>
     <h4>전체 설정</h4>
     <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-enabled> 확장 활성화</label><label class="sp-check" title="체크를 해제하거나 새로고침하면 원래 프사로 돌아옵니다."><input type="checkbox" data-hide-portraits> 지정 인물 프사만 가리기</label></div>
+    <label class="sp-field">렌더링 최대 깊이<input type="number" min="0" step="1" inputmode="numeric" data-render-depth aria-describedby="sp-render-depth-help"></label>
+    <p class="sp-muted" id="sp-render-depth-help">렌더링할 메시지 수를 최신 메시지부터 세어 설정합니다. 0이면 모든 메시지를 렌더링합니다.</p>
     <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
     <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
     <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
@@ -354,7 +363,7 @@ function mount(){
   container.append(panel);
   panel.querySelector('[data-hide-portraits]').onchange=event=>{
     portraitsHidden=event.target.checked;
-    clearTimeout(timer);needsReset=true;renderChat();
+    if(timer!==null)cancelAnimationFrame(timer);needsReset=true;renderChat();
   };
   panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;
   panel.querySelector('[data-prompt-enabled]').onchange=async event=>{
@@ -389,14 +398,15 @@ function mount(){
     .observe(content,{attributes:true,attributeFilter:['style','class']});
   for(const [selector,key,isBoolean] of [
     ['[data-enabled]','enabled',true],
+    ['[data-render-depth]','renderDepth'],
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
     ['[data-font-mode]','fontMode'],['[data-name-font]','nameFont'],['[data-dialogue-font]','dialogueFont'],
     ['[data-color-enabled]','quoteColorEnabled',true],['[data-quote-color]','quoteColor'],
     ['[data-name-size]','nameFontSize'],['[data-dialogue-size]','dialogueFontSize'],
     ['[data-design]','design'],['[data-shape]','shape'],['[data-size]','size'],
   ])panel.querySelector(selector).addEventListener('change',async event=>{
-    const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize'].includes(key)?Number(event.target.value):event.target.value;
-    try{await persist(current=>({...current,[key]:value}));message('');}
+    const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize','renderDepth'].includes(key)?Number(event.target.value):event.target.value;
+    try{await persist(current=>({...current,[key]:value}),[],key!=='renderDepth');message('');}
     catch(error){message(error.message,true);refreshUI();}
   });
   panel.querySelector('[data-size]').oninput=event=>{panel.querySelector('[data-size-output]').textContent=`${event.target.value}px`;};
@@ -446,15 +456,17 @@ async function initialize(){
   catch{imagesReady=allProfiles(store).every(p=>isServerImage(p.image)||p.photoSource);if(!imagesReady)storageError='기존 브라우저 사진을 읽지 못했어요. 원래 브라우저의 저장소를 확인해 주세요.';}
   if(!ctx().extensionSettings[KEY]?.storageId){ctx().extensionSettings[KEY]={...store,storageId};ctx().saveSettingsDebounced();}
   renderer=createRenderer({getSettings:()=>store,getSources,getImage:result=>profileImage(result?.profile),getMaskState:()=>portraitsHidden});
-  observer=new MutationObserver(()=>schedule());
+  chatRenderer=createChatRenderer(renderer);
+  observer=new MutationObserver(records=>{if(chatRenderer.markMutations(records))schedule();});
   if(document.readyState==='loading')await new Promise(resolve=>document.addEventListener('DOMContentLoaded',resolve,{once:true}));
   mount();if(storageError)message(storageError,true);
   const {eventSource}=ctx(),events=ctx().eventTypes??ctx().event_types??{};
   syncDialoguePrompt(ctx(),store);
   for(const key of ['CHAT_CHANGED','GENERATION_STARTED','APP_READY'])if(events[key])eventSource.on(events[key],()=>syncDialoguePrompt(ctx(),store));
-  for(const key of ['CHAT_CHANGED','CHARACTER_EDITED'])if(events[key])eventSource.on(events[key],changeContext);
-  for(const key of ['USER_MESSAGE_RENDERED','CHARACTER_MESSAGE_RENDERED','MESSAGE_EDITED','MESSAGE_SWIPED','GENERATION_ENDED']){
-    if(events[key])eventSource.on(events[key],()=>schedule(true));
+  if(events.CHAT_CHANGED)eventSource.on(events.CHAT_CHANGED,changeContext);
+  if(events.CHARACTER_EDITED)eventSource.on(events.CHARACTER_EDITED,()=>{changeContext();schedule(true);});
+  for(const key of ['USER_MESSAGE_RENDERED','CHARACTER_MESSAGE_RENDERED','MESSAGE_EDITED','MESSAGE_SWIPED','MESSAGE_DELETED','GENERATION_ENDED']){
+    if(events[key])eventSource.on(events[key],()=>schedule());
   }
   if(events.APP_READY)eventSource.on(events.APP_READY,()=>{mount();changeContext();});
   observe();schedule(true);

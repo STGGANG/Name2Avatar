@@ -21,7 +21,7 @@
 .sp-muted{opacity:.65;font-size:11px;line-height:1.65}
 .sp-settings .sp-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .sp-settings .sp-toolbar>h4{margin-right:auto}
-.sp-settings button,.sp-settings select,.sp-settings input[type=text],.sp-settings textarea{font:inherit;color:inherit;border:1px solid var(--sp-border);border-radius:8px;background:color-mix(in srgb,var(--sp-text) 3%,transparent);padding:7px 10px;min-width:0;max-width:100%;box-shadow:none}
+.sp-settings button,.sp-settings select,.sp-settings input[type=text],.sp-settings input[type=number],.sp-settings textarea{font:inherit;color:inherit;border:1px solid var(--sp-border);border-radius:8px;background:color-mix(in srgb,var(--sp-text) 3%,transparent);padding:7px 10px;min-width:0;max-width:100%;box-shadow:none}
 .sp-settings button{cursor:pointer;line-height:1.45;width:auto;touch-action:manipulation}
 .sp-settings button:hover{background:color-mix(in srgb,var(--sp-text) 9%,transparent)}
 .sp-settings button:disabled{opacity:.45;cursor:wait}
