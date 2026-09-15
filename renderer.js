@@ -1,5 +1,5 @@
 import { parseDialogueLine, resolveSpeaker, dialoguePrefix, normalizeName } from './core.js?v=1.0.1';
-import { applyTypography } from './typography.js';
+import { applyTypography } from './typography.js?v=1.0.1-fonts';
 
 const EXCLUDED='pre,code,style,script,textarea,iframe,svg,table,details,.mg-status,.speakers,.sp-line,[data-sp-skip]';
 const INLINE=new Set(['A','ABBR','B','BDI','BDO','CITE','DEL','EM','I','MARK','Q','S','SMALL','SPAN','STRONG','SUB','SUP','U']);
@@ -64,6 +64,10 @@ export function decorateLine(line,settings) {
   line.dataset.namePosition=settings.namePosition;
   line.dataset.quoteStyle=settings.quoteStyle;
   line.style.setProperty('--sp-size',`${settings.size}px`);
+  if(settings.bubbleColorEnabled){
+    const rgb=[1,3,5].map(start=>parseInt(settings.bubbleColor.slice(start,start+2),16));
+    line.style.setProperty('--sp-bubble-background',`rgba(${rgb.join(',')},${settings.bubbleOpacity/100})`);
+  }else line.style.removeProperty('--sp-bubble-background');
 }
 
 // Inline !important beats ordinary theme rules, even theme q rules using !important.

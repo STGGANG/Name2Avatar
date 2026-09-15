@@ -2,6 +2,7 @@ import {parseDialogueLine} from './core.js';
 
 // Private family names avoid redefining fonts registered by other extensions.
 export const FONT_OPTIONS=Object.freeze([
+  ['theme','ST 설정 따르기',null,null],
   ['pretendard','프리텐다드','SPFontPretendard','https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/static/woff2/Pretendard-Regular.woff2'],
   ['ridi','리디바탕','SPFontRidi','https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_twelve@1.0/RIDIBatang.woff'],
   ['gowun','고운돋움','SPFontGowun','https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/gowundodum/GowunDodum-Regular.ttf'],
@@ -12,7 +13,7 @@ export const FONT_OPTIONS=Object.freeze([
 export function ensureFonts(settings){
   if(settings.fontMode!=='custom')return;
   for(const key of new Set([settings.nameFont,settings.dialogueFont])){
-    const font=FONT_OPTIONS.find(item=>item[0]===key);if(!font||document.getElementById(`sp-font-${key}`))continue;
+    const font=FONT_OPTIONS.find(item=>item[0]===key);if(!font?.[3]||document.getElementById(`sp-font-${key}`))continue;
     const style=document.createElement('style');style.id=`sp-font-${key}`;
     style.textContent=`@font-face{font-family:'${font[2]}';src:url('${font[3]}');font-weight:400;font-style:normal;font-display:swap}`;
     document.head.append(style);
@@ -24,7 +25,7 @@ function family(element,key,size){
   // Only this extension's rendered copies; never change global ST or Font-Manager rules.
   for(const node of [element,...element.querySelectorAll('*')]){
     if(node.matches('i[class*="fa"],svg,[class*="fa-"],code,pre'))continue;
-    node.style.setProperty('font-family',`'${font[2]}', sans-serif`,'important');
+    if(font[2])node.style.setProperty('font-family',`'${font[2]}', sans-serif`,'important');
     node.style.setProperty('font-size',`${size}px`,'important');
     node.style.setProperty('line-height',node===element?'1.6':'inherit','important');
   }

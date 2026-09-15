@@ -1,10 +1,10 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.0.1-depth';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.0.1-appearance';
 import { syncDialoguePrompt } from './prompt.js';
-import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.0.1';
+import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.0.1-appearance';
 import { createChatRenderer } from './chat-renderer.js';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.0.1-depth';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.0.1-appearance';
 import { bindCropDrag } from './crop.js';
-import { FONT_OPTIONS, applyTypography } from './typography.js';
+import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.0.1-fonts';
 import {uploadPortrait,portableImage} from './server-images.js';
 
 // Keep the v1 storage key and profile IDs so existing names and photos survive upgrades.
@@ -85,6 +85,7 @@ function refreshUI(){
   for(const [selector,key,boolean] of [
     ['[data-enabled]','enabled',true],
     ['[data-render-depth]','renderDepth'],
+    ['[data-bubble-enabled]','bubbleColorEnabled',true],['[data-bubble-color]','bubbleColor'],['[data-bubble-opacity]','bubbleOpacity'],
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
     ['[data-font-mode]','fontMode'],['[data-name-font]','nameFont'],['[data-dialogue-font]','dialogueFont'],
     ['[data-color-enabled]','quoteColorEnabled',true],['[data-quote-color]','quoteColor'],
@@ -92,6 +93,9 @@ function refreshUI(){
     ['select[data-design]','design'],['select[data-shape]','shape'],['[data-size]','size'],
   ])panel.querySelector(selector)[boolean?'checked':'value']=store[key];
   panel.querySelector('[data-size-output]').textContent=`${store.size}px`;
+  panel.querySelector('[data-bubble-settings]').hidden=store.design!=='bubble';
+  panel.querySelector('[data-bubble-fields]').hidden=!store.bubbleColorEnabled;
+  panel.querySelector('[data-bubble-opacity-output]').textContent=store.bubbleOpacity+'%';
   panel.querySelector('[data-font-fields]').hidden=store.fontMode!=='custom';
   panel.querySelector('[data-quote-color]').disabled=!store.quoteColorEnabled;
   panel.querySelector('[data-name-size-output]').textContent=store.nameFontSize+'px';
@@ -322,6 +326,14 @@ function mount(){
     <label class="sp-field">렌더링 최대 깊이<input type="number" min="0" step="1" inputmode="numeric" data-render-depth aria-describedby="sp-render-depth-help"></label>
     <p class="sp-muted" id="sp-render-depth-help">렌더링할 메시지 수를 최신 메시지부터 세어 설정합니다. 0이면 모든 메시지를 렌더링합니다.</p>
     <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
+    <div class="sp-bubble-settings" data-bubble-settings hidden>
+      <label class="sp-check"><input type="checkbox" data-bubble-enabled> 말풍선 배경 직접 설정</label>
+      <div class="sp-bubble-settings" data-bubble-fields hidden>
+        <label class="sp-check">배경 색상 <input type="color" data-bubble-color aria-label="말풍선 배경 색상"></label>
+        <label class="sp-range">불투명도<input type="range" min="0" max="100" step="1" data-bubble-opacity aria-label="말풍선 배경 불투명도"><output data-bubble-opacity-output></output></label>
+        <p class="sp-muted">0%는 완전 투명, 100%는 불투명합니다. 직접 설정을 끄면 기존 배경으로 돌아갑니다.</p>
+      </div>
+    </div>
     <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
     <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
     <label class="sp-field">따옴표 스타일<select data-quote-style><option value="theme">현재 ST 테마 그대로</option><option value="override">덮어쓰기 · 확장 스타일 우선</option></select></label>
@@ -399,16 +411,18 @@ function mount(){
   for(const [selector,key,isBoolean] of [
     ['[data-enabled]','enabled',true],
     ['[data-render-depth]','renderDepth'],
+    ['[data-bubble-enabled]','bubbleColorEnabled',true],['[data-bubble-color]','bubbleColor'],['[data-bubble-opacity]','bubbleOpacity'],
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
     ['[data-font-mode]','fontMode'],['[data-name-font]','nameFont'],['[data-dialogue-font]','dialogueFont'],
     ['[data-color-enabled]','quoteColorEnabled',true],['[data-quote-color]','quoteColor'],
     ['[data-name-size]','nameFontSize'],['[data-dialogue-size]','dialogueFontSize'],
     ['[data-design]','design'],['[data-shape]','shape'],['[data-size]','size'],
   ])panel.querySelector(selector).addEventListener('change',async event=>{
-    const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize','renderDepth'].includes(key)?Number(event.target.value):event.target.value;
+    const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize','renderDepth','bubbleOpacity'].includes(key)?Number(event.target.value):event.target.value;
     try{await persist(current=>({...current,[key]:value}),[],key!=='renderDepth');message('');}
     catch(error){message(error.message,true);refreshUI();}
   });
+  panel.querySelector('[data-bubble-opacity]').oninput=event=>{panel.querySelector('[data-bubble-opacity-output]').textContent=event.target.value+'%';};
   panel.querySelector('[data-size]').oninput=event=>{panel.querySelector('[data-size-output]').textContent=`${event.target.value}px`;};
   for(const key of ['name','dialogue'])panel.querySelector(`[data-${key}-size]`).oninput=event=>{
     panel.querySelector(`[data-${key}-size-output]`).textContent=event.target.value+'px';
