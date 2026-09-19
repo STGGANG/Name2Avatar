@@ -23,6 +23,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
     dialogueFontSize: 15,
     quoteColorEnabled: false,
     quoteColor: '#808080',
+    emphasisColorEnabled: false,
+    emphasisColor: '#808080',
+    parenColorEnabled: false,
+    parenColor: '#808080',
     quoteStyle: 'theme',
     design: 'minimal',
     bubbleColorEnabled: false,
@@ -30,6 +34,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
     bubbleOpacity: 7,
     shape: 'circle',
     size: 48,
+    borderEnabled: false,
+    borderColor: '#808080',
+    borderWidth: 1,
     profiles: Object.freeze([]),
 });
 
@@ -93,23 +100,50 @@ export function parseDialogueLine(text) {
     return { name, speech, translation, quoteOpen, quoteClose };
 }
 
+/** Name lookups run once per rendered line, so the scan is replaced by a prebuilt index. */
+let speakerCache = null;
+
+function nameIndex(entries) {
+    const index = new Map();
+    for (const profile of Array.isArray(entries) ? entries : []) {
+        if (!record(profile)) continue;
+        const aliases = own(profile, 'aliases');
+        const names = [own(profile, 'name'), ...(Array.isArray(aliases) ? aliases : [])];
+        // A profile listing one name twice must not make itself ambiguous.
+        const seen = new Set();
+        for (const name of names) {
+            const key = normalizeName(name);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            const bucket = index.get(key);
+            if (bucket) bucket.push(profile);
+            else index.set(key, [profile]);
+        }
+    }
+    return index;
+}
+
+/** Rebuilt only when a save replaces the profile arrays; sanitizing always returns new ones. */
+function speakerIndex(scopedProfiles, profiles) {
+    if (speakerCache?.scoped === scopedProfiles && speakerCache.global === profiles) return speakerCache;
+    speakerCache = {
+        scoped: scopedProfiles,
+        global: profiles,
+        scopedIndex: nameIndex(scopedProfiles),
+        globalIndex: nameIndex(profiles),
+    };
+    return speakerCache;
+}
+
 /** Only explicitly registered people match. Bot-specific names take priority. */
 export function resolveSpeaker(name, { scopedProfiles = [], profiles = [] } = {}) {
     const target = normalizeName(name);
     if (!target) return null;
-    const matchingProfiles = entries => (Array.isArray(entries) ? entries : []).filter(profile => {
-        if (!record(profile)) return false;
-        if (normalizeName(own(profile, 'name')) === target) return true;
-        const aliases = own(profile, 'aliases');
-        return Array.isArray(aliases) && aliases.some(alias => normalizeName(alias) === target);
-    });
-    const scoped = matchingProfiles(scopedProfiles);
-    if (scoped.length > 1) return { kind: 'ambiguous' };
-    if (scoped.length === 1) return { kind: 'profile', profile: scoped[0] };
-    const custom = matchingProfiles(profiles);
-    if (custom.length > 1) return { kind: 'ambiguous' };
-    if (custom.length === 1) return { kind: 'profile', profile: custom[0] };
-
+    const index = speakerIndex(scopedProfiles, profiles);
+    for (const bucket of [index.scopedIndex.get(target), index.globalIndex.get(target)]) {
+        if (!bucket) continue;
+        return bucket.length > 1 ? { kind: 'ambiguous' } : { kind: 'profile', profile: bucket[0] };
+    }
     return null;
 }
 
@@ -164,6 +198,8 @@ function safeImage(value) {
 export function sanitizeSettings(input) {
     const source = record(input) ? input : {};
     const boolean = (key, fallback) => typeof own(source, key) === 'boolean' ? own(source, key) : fallback;
+    const hexColor = (key, fallback = '#808080') => typeof own(source, key) === 'string'
+        && /^#[0-9a-f]{6}$/i.test(own(source, key)) ? own(source, key) : fallback;
     const design = own(source, 'design');
     const shape = own(source, 'shape');
     const storedPrompt = own(source, 'dialoguePrompt');
@@ -190,14 +226,21 @@ export function sanitizeSettings(input) {
         nameFontSize: Math.round(boundedNumber(own(source,'nameFontSize'),10,28,12)),
         dialogueFontSize: Math.round(boundedNumber(own(source,'dialogueFontSize'),12,36,15)),
         quoteColorEnabled: boolean('quoteColorEnabled',false),
-        quoteColor: typeof own(source,'quoteColor')==='string' && /^#[0-9a-f]{6}$/i.test(own(source,'quoteColor')) ? own(source,'quoteColor') : '#808080',
+        quoteColor: hexColor('quoteColor'),
+        emphasisColorEnabled: boolean('emphasisColorEnabled',false),
+        emphasisColor: hexColor('emphasisColor'),
+        parenColorEnabled: boolean('parenColorEnabled',false),
+        parenColor: hexColor('parenColor'),
         quoteStyle: own(source, 'quoteStyle') === 'override' ? 'override' : 'theme',
         design: ['minimal', 'bubble'].includes(design) ? design : 'minimal',
         bubbleColorEnabled: boolean('bubbleColorEnabled', false),
-        bubbleColor: typeof own(source,'bubbleColor')==='string' && /^#[0-9a-f]{6}$/i.test(own(source,'bubbleColor')) ? own(source,'bubbleColor') : '#808080',
+        bubbleColor: hexColor('bubbleColor'),
         bubbleOpacity: Math.round(boundedNumber(own(source,'bubbleOpacity'),0,100,7)),
         shape: ['circle', 'rounded'].includes(shape) ? shape : 'circle',
         size: Math.round(boundedNumber(own(source, 'size'), 32, 88, 48)),
+        borderEnabled: boolean('borderEnabled', false),
+        borderColor: hexColor('borderColor'),
+        borderWidth: Math.round(boundedNumber(own(source, 'borderWidth'), 0, 6, 1)),
         profiles: [],
     };
     const entries = own(source, 'profiles');

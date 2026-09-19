@@ -1,4 +1,4 @@
-import {parseDialogueLine} from './core.js';
+import {parseDialogueLine} from './core.js?v=1.2.1';
 
 // Private family names avoid redefining fonts registered by other extensions.
 export const FONT_OPTIONS=Object.freeze([
@@ -31,35 +31,76 @@ function family(element,key,size){
   }
 }
 
+const HEX=/^#[0-9a-f]{6}$/i;
+// Icon glyphs and code keep their own colors; only prose is recolored.
+const SKIP='i[class*="fa"],svg,[class*="fa-"],code,pre';
+const EMPHASIS=/\*[^*\n]+\*/gu;
+const PARENS=/[(（][^()（）\n]*[)）]/gu;
+
+function textNodes(content){
+  const walker=document.createTreeWalker(content,NodeFilter.SHOW_TEXT);const nodes=[];
+  while(walker.nextNode())nodes.push(walker.currentNode);
+  return nodes;
+}
+
+// Split text nodes in place instead of moving q/em ancestors or their translation styles.
+function paint(content,start,end,color,className){
+  let offset=0;
+  for(const node of textNodes(content)){
+    const length=node.textContent.length,a=Math.max(0,start-offset),b=Math.min(length,end-offset);offset+=length;
+    if(a>=b||node.parentElement?.closest(SKIP))continue;
+    let selected=node;if(b<length)node.splitText(b);if(a>0)selected=node.splitText(a);
+    const span=document.createElement('span');span.className=className;span.style.setProperty('color',color,'important');
+    selected.before(span);span.append(selected);
+  }
+}
+
+/** Each range is painted against the current DOM; splitting never changes the text offsets. */
+function paintMatches(content,color,pattern,className){
+  if(!HEX.test(color))return;
+  const text=content.textContent;
+  for(const match of [...text.matchAll(pattern)])paint(content,match.index,match.index+match[0].length,color,className);
+}
+
 export function colorSpeech(content,color){
-  if(!/^#[0-9a-f]{6}$/i.test(color))return;
+  if(!HEX.test(color))return;
   const text=content.textContent;
   const parsed=parseDialogueLine(`Speaker | ${text.trim()}`);
-  let start=text.length-text.trimStart().length,end;
-  if(parsed)end=start+parsed.speech.length+2;
-  else {
+  if(!parsed){
     // ST sometimes represents the quote marks only via q pseudo-elements.
     const quote=content.querySelector('q');if(!quote)return;
     for(const node of [quote,...quote.querySelectorAll('*')])node.style.setProperty('color',color,'important');
     return;
   }
-  const walker=document.createTreeWalker(content,NodeFilter.SHOW_TEXT);const nodes=[];
-  while(walker.nextNode())nodes.push(walker.currentNode);
-  let offset=0;
-  // Split text nodes in place instead of moving q/em ancestors or their translation styles.
-  for(const node of nodes){
-    const length=node.textContent.length,a=Math.max(0,start-offset),b=Math.min(length,end-offset);offset+=length;
-    if(a>=b)continue;
-    let selected=node;if(b<length)node.splitText(b);if(a>0)selected=node.splitText(a);
-    const span=document.createElement('span');span.className='sp-quoted';span.style.setProperty('color',color,'important');
-    selected.before(span);span.append(selected);
+  const start=text.length-text.trimStart().length;
+  paint(content,start,start+parsed.speech.length+2,color,'sp-quoted');
+}
+
+/** Markdown italics arrive as em/i; literal asterisks survive when markdown is off. */
+export function colorEmphasis(content,color){
+  if(!HEX.test(color))return;
+  for(const element of content.querySelectorAll('em,i')){
+    if(element.matches(SKIP))continue;
+    for(const node of [element,...element.querySelectorAll('*')]){
+      if(!node.matches(SKIP))node.style.setProperty('color',color,'important');
+    }
   }
+  paintMatches(content,color,EMPHASIS,'sp-emphasis');
+}
+
+export function colorParens(content,color){
+  paintMatches(content,color,PARENS,'sp-paren');
 }
 
 export function applyTypography(line,settings){
   const name=line.querySelector('.sp-name');
   name?.style.setProperty('font-weight','700','important');
-  if(settings.quoteColorEnabled)for(const words of line.querySelectorAll('.sp-words'))colorSpeech(words,settings.quoteColor);
+  // Quotes first: emphasis and parentheses nest deeper, so their color wins inside a quote.
+  for(const words of line.querySelectorAll('.sp-words')){
+    if(settings.quoteColorEnabled)colorSpeech(words,settings.quoteColor);
+    if(settings.emphasisColorEnabled)colorEmphasis(words,settings.emphasisColor);
+    if(settings.parenColorEnabled)colorParens(words,settings.parenColor);
+  }
   if(settings.fontMode==='custom'){
     ensureFonts(settings);if(name)family(name,settings.nameFont,settings.nameFontSize);
     for(const words of line.querySelectorAll('.sp-words'))family(words,settings.dialogueFont,settings.dialogueFontSize);

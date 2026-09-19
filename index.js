@@ -1,11 +1,11 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.0.1-appearance';
-import { syncDialoguePrompt } from './prompt.js';
-import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.0.1-appearance';
-import { createChatRenderer } from './chat-renderer.js';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.0.1-appearance';
-import { bindCropDrag } from './crop.js';
-import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.0.1-fonts';
-import {uploadPortrait,portableImage} from './server-images.js';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.2.1';
+import { syncDialoguePrompt } from './prompt.js?v=1.2.1';
+import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.2.1';
+import { createChatRenderer } from './chat-renderer.js?v=1.2.1';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.2.1';
+import { bindCropDrag } from './crop.js?v=1.2.1';
+import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.2.1';
+import {uploadPortrait,portableImage} from './server-images.js?v=1.2.1';
 
 // Keep the v1 storage key and profile IDs so existing names and photos survive upgrades.
 const KEY='speaker_portraits_v1';
@@ -13,6 +13,7 @@ const ctx=()=>SillyTavern.getContext();
 const uid=()=>globalThis.crypto?.randomUUID?.()??`sp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let store,storageId,panel,draft=null,original=null,activeScope=null,renderer,chatRenderer,observer,timer=null;
 let needsReset=false,imagesReady=false,saveQueue=Promise.resolve();
+let storedImageKey=null,librarySignature=null,libraryRows=[],sourcesCache=null;
 let portraitsHidden=false;
 
 const database=new Promise((resolve,reject)=>{
@@ -38,11 +39,43 @@ function profileImage(person){
   if(person?.photoSource)return ctx().getThumbnailUrl(person.photoSource.type,person.photoSource.file);
   return person?.image??'';
 }
-function getSources(){
+// ST keeps persona names in settings even after the avatar file is gone; hide those.
+let userAvatars=null;
+async function refreshUserAvatars(){
+  try{
+    const response=await fetch('/api/avatars/get',{method:'POST',credentials:'same-origin',
+      headers:ctx().getRequestHeaders?.(),signal:AbortSignal.timeout(10000)});
+    if(!response.ok)return;
+    const list=await response.json();
+    if(Array.isArray(list))userAvatars=new Set(list.map(item=>typeof item==='string'?item:item?.name??item?.avatar).filter(Boolean));
+  }catch{/* Without the file list every persona stays visible, as before. */}
+}
+function personaList(){
+  return Object.entries(ctx().powerUserSettings?.personas??{})
+    .map(([file,value])=>({file,name:typeof value==='string'?value:value?.name??''}))
+    .filter(entry=>entry.name&&(!userAvatars||userAvatars.has(entry.file)));
+}
+/** The photo a brand-new entry starts with: this chat's bot, else the current persona. */
+function currentPhotoSource(){
+  const context=ctx(),index=context.characterId;
+  const character=index===undefined||index===null||index===''?null:(context.characters??[])[index];
+  if(character?.avatar)return {type:'avatar',file:character.avatar};
+  const persona=personaList().find(entry=>normalizeName(entry.name)===normalizeName(context.name1));
+  return persona?{type:'persona',file:persona.file}:null;
+}
+function sourceValue(photoSource){
+  if(!photoSource)return '';
+  if(photoSource.type==='persona')return `persona:${photoSource.file}`;
+  const index=(ctx().characters??[]).findIndex(character=>character?.avatar===photoSource.file);
+  return index>=0?`character:${index}`:'';
+}
+function freshSources(){
   const active=getActiveScope(ctx());
   const local=store.scopes.find(scope=>scope.key===active?.key);
   return {scopedProfiles:local?.settings.profiles??[],profiles:store.profiles};
 }
+// renderChat is synchronous, so one lookup serves every message it touches.
+function getSources(){return sourcesCache??freshSources();}
 function message(text,error=false){
   const status=panel?.querySelector('.sp-message');
   if(status){status.textContent=text;status.dataset.error=String(error);}
@@ -50,6 +83,15 @@ function message(text,error=false){
 function refreshPortraitMask(){
   const checkbox=panel?.querySelector('[data-hide-portraits]');
   if(checkbox)checkbox.checked=portraitsHidden;
+}
+function withoutLocalImage(person){
+  const copy={...person};
+  if(!isServerImage(copy.image))delete copy.image;
+  return copy;
+}
+/** Identifies a set of stored photos without comparing megabytes of base64 on every save. */
+function imageKey(images){
+  return Object.keys(images).sort().map(id=>`${id}:${images[id].length}:${images[id].slice(-24)}`).join('|');
 }
 /** Serialize mutations against the latest committed store, not a stale UI snapshot. */
 function persist(update,uploadIds=[],reset=true){
@@ -62,11 +104,14 @@ function persist(update,uploadIds=[],reset=true){
         person.image=await uploadPortrait(person.image,ctx().getRequestHeaders);
     }
     const images=Object.fromEntries(allProfiles(clean).filter(p=>p.image?.startsWith('data:')).map(p=>[p.id,p.image]));
-    const metadata=structuredClone(clean);
-    for(const person of allProfiles(metadata))if(!isServerImage(person.image))delete person.image;
+    // Drop photo data before cloning: settings.json only ever stores server paths.
+    const metadata=structuredClone({...clean,profiles:clean.profiles.map(withoutLocalImage),
+      scopes:clean.scopes.map(scope=>({...scope,settings:{...scope.settings,profiles:scope.settings.profiles.map(withoutLocalImage)}}))});
     metadata.storageId=storageId;
     // Preserve legacy local copies. Server-only accounts do not require IndexedDB.
-    if(Object.keys(images).length)await imageStore({...await imageStore(),...images});
+    const key=imageKey(images);
+    if(Object.keys(images).length&&key!==storedImageKey)await imageStore({...await imageStore(),...images});
+    storedImageKey=key;
     ctx().extensionSettings[KEY]=metadata;
     ctx().saveSettingsDebounced();
     store=clean;syncDialoguePrompt(ctx(),store);refreshUI();schedule(reset);
@@ -89,15 +134,28 @@ function refreshUI(){
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
     ['[data-font-mode]','fontMode'],['[data-name-font]','nameFont'],['[data-dialogue-font]','dialogueFont'],
     ['[data-color-enabled]','quoteColorEnabled',true],['[data-quote-color]','quoteColor'],
+    ['[data-emphasis-enabled]','emphasisColorEnabled',true],['[data-emphasis-color]','emphasisColor'],
+    ['[data-paren-enabled]','parenColorEnabled',true],['[data-paren-color]','parenColor'],
     ['[data-name-size]','nameFontSize'],['[data-dialogue-size]','dialogueFontSize'],
     ['select[data-design]','design'],['select[data-shape]','shape'],['[data-size]','size'],
+    ['[data-border-enabled]','borderEnabled',true],['[data-border-color]','borderColor'],['[data-border-width]','borderWidth'],
   ])panel.querySelector(selector)[boolean?'checked':'value']=store[key];
   panel.querySelector('[data-size-output]').textContent=`${store.size}px`;
   panel.querySelector('[data-bubble-settings]').hidden=store.design!=='bubble';
   panel.querySelector('[data-bubble-fields]').hidden=!store.bubbleColorEnabled;
   panel.querySelector('[data-bubble-opacity-output]').textContent=store.bubbleOpacity+'%';
   panel.querySelector('[data-font-fields]').hidden=store.fontMode!=='custom';
+  panel.querySelector('[data-border-fields]').hidden=!store.borderEnabled;
+  panel.querySelector('[data-border-width-output]').textContent=store.borderWidth+'px';
+  if(store.borderEnabled){
+    panel.style.setProperty('--sp-avatar-border-color',store.borderColor);
+    panel.style.setProperty('--sp-avatar-border-width',`${store.borderWidth}px`);
+  }else{
+    panel.style.removeProperty('--sp-avatar-border-color');panel.style.removeProperty('--sp-avatar-border-width');
+  }
   panel.querySelector('[data-quote-color]').disabled=!store.quoteColorEnabled;
+  panel.querySelector('[data-emphasis-color]').disabled=!store.emphasisColorEnabled;
+  panel.querySelector('[data-paren-color]').disabled=!store.parenColorEnabled;
   panel.querySelector('[data-name-size-output]').textContent=store.nameFontSize+'px';
   panel.querySelector('[data-dialogue-size-output]').textContent=store.dialogueFontSize+'px';
   library();if(draft)preview();
@@ -120,12 +178,13 @@ function renderChat(){
   timer=null;
   chatRenderer.markMutations(observer.takeRecords());
   observer.disconnect();
+  sourcesCache=freshSources();
   try{chatRenderer.render(document.getElementById('chat'),{
     depth:store.renderDepth,totalMessages:Array.isArray(ctx().chat)?ctx().chat.length:null,
     enabled:store.enabled,reset:needsReset,
   });}
   catch(error){console.error('[Name2Avatar] 표시 오류',error);}
-  finally{needsReset=false;observe();}
+  finally{needsReset=false;sourcesCache=null;observe();}
 }
 function syncCrop(){
   if(!draft)return;
@@ -140,7 +199,9 @@ function preview(){
   const line=document.createElement('span');line.className='sp-line';decorateLine(line,store);
   const body=document.createElement('span');body.className='sp-body';
   const name=document.createElement('span');name.className='sp-name';name.textContent=draft.name||'이름';
-  const words=document.createElement('span');words.className='sp-words';words.textContent='“여기서 다시 만나네요.” (번역 미리보기)';
+  const words=document.createElement('span');words.className='sp-words';
+  const emphasis=document.createElement('em');emphasis.textContent='살짝 웃으며';
+  words.append('“여기서 다시 만나네요.” ',emphasis,' (번역 미리보기)');
   body.append(name,words);line.append(makeAvatar(draft.name||'이름',profileImage(draft),draft),body);applyTypography(line,store);
   panel.querySelector('.sp-preview').replaceChildren(line);
   const photo=makeAvatar(draft.name||'이름',profileImage(draft),draft);
@@ -152,63 +213,95 @@ function preview(){
   bindCropDrag(photo,{getCrop:()=>editing,onChange:crop=>{if(draft===editing){Object.assign(draft,crop);syncCrop();}}});
   syncCrop();
 }
+function profileRow({person,scope}){
+  const row=document.createElement('div');row.className='sp-profile-row';
+  row.dataset.enabled=String(person.enabled!==false);
+  const info=document.createElement('span');info.className='sp-profile-info';
+  const names=document.createElement('b');names.textContent=[person.name,...person.aliases].join(', ');names.title=names.textContent;
+  const badge=document.createElement('small');badge.textContent=scope?`현재 ${scope.key.startsWith('group:')?'그룹':'봇'} 전용`:'모든 봇 공통 적용';
+  if(person.hideWhenMasked)badge.textContent+=' · 가리기 대상';
+  info.append(names,badge);
+  const actions=document.createElement('span');actions.className='sp-row-actions';
+  const toggle=document.createElement('button');toggle.type='button';toggle.className='sp-person-toggle';
+  toggle.setAttribute('role','switch');toggle.setAttribute('aria-checked',String(person.enabled!==false));
+  toggle.setAttribute('aria-label',`${person.name} ${scope?'전용':'공통'} 프로필 표시`);
+  toggle.title='끄면 이 인물의 대사를 원래 텍스트로 표시합니다.';
+  toggle.textContent=person.enabled===false?'OFF':'ON';
+  toggle.onclick=async()=>{
+    const enabled=person.enabled===false;toggle.disabled=true;
+    try{
+      await persist(current=>{
+        const next=structuredClone(current);
+        const settings=scope?next.scopes.find(entry=>entry.key===scope.key)?.settings:next;
+        const profile=settings?.profiles.find(entry=>entry.id===person.id);
+        if(profile)profile.enabled=enabled;
+        return next;
+      });
+      message('');
+    }catch(error){message(error.message,true);refreshUI();}
+  };
+  actions.append(toggle);
+  const edit=document.createElement('button');edit.type='button';edit.textContent='편집';
+  edit.setAttribute('aria-label',`${person.name} ${scope?'전용':'공통'} 편집`);edit.onclick=()=>editPerson(person,scope);actions.append(edit);
+  row.append(makeAvatar(person.name,profileImage(person),person),info,actions);
+  return row;
+}
+/** Photo data is never read here, so the signature stays cheap even with local images. */
+function librarySignatureOf(entries,scopeKey){
+  return `${scopeKey}\u0003`+entries.map(({person,scope})=>[person.id,scope?1:0,person.name,person.aliases.join('\u0001'),
+    person.enabled===false?0:1,person.hideWhenMasked?1:0,
+    person.photoSource?`s${person.photoSource.type}/${person.photoSource.file}`:`i${person.image.length}${person.image.slice(-16)}`].join('\u0002')).join('\u0003');
+}
 function library(){
-  const list=panel.querySelector('.sp-library');list.replaceChildren();
+  const list=panel.querySelector('.sp-library');
   const local=store.scopes.find(scope=>scope.key===activeScope?.key);
-  const entries=[...(local?.settings.profiles??[]).map(person=>({person,scope:activeScope})),
+  const all=[...(local?.settings.profiles??[]).map(person=>({person,scope:activeScope})),
     ...store.profiles.map(person=>({person,scope:null}))];
-  panel.querySelector('[data-count]').textContent=`${entries.length}명`;
-  if(!entries.length){
-    const empty=document.createElement('p');empty.className='sp-empty';empty.textContent='이름을 등록하고 사진을 연결해 주세요.';list.append(empty);return;
+  // Rows are rebuilt only when the people change; searching just hides the ones that do not match.
+  const signature=librarySignatureOf(all,activeScope?.key??'');
+  if(signature!==librarySignature){
+    librarySignature=signature;
+    libraryRows=all.map(entry=>({...entry,row:profileRow(entry)}));
+    list.replaceChildren(...libraryRows.map(entry=>entry.row));
   }
-  for(const {person,scope} of entries){
-    const row=document.createElement('div');row.className='sp-profile-row';
-    row.dataset.enabled=String(person.enabled!==false);
-    const info=document.createElement('span');info.className='sp-profile-info';
-    const names=document.createElement('b');names.textContent=[person.name,...person.aliases].join(', ');names.title=names.textContent;
-    const badge=document.createElement('small');badge.textContent=scope?`현재 ${scope.key.startsWith('group:')?'그룹':'봇'} 전용`:'모든 봇 공통 적용';
-    if(person.hideWhenMasked)badge.textContent+=' · 가리기 대상';
-    info.append(names,badge);
-    const actions=document.createElement('span');actions.className='sp-row-actions';
-    const toggle=document.createElement('button');toggle.type='button';toggle.className='sp-person-toggle';
-    toggle.setAttribute('role','switch');toggle.setAttribute('aria-checked',String(person.enabled!==false));
-    toggle.setAttribute('aria-label',`${person.name} ${scope?'전용':'공통'} 프로필 표시`);
-    toggle.title='끄면 이 인물의 대사를 원래 텍스트로 표시합니다.';
-    toggle.textContent=person.enabled===false?'OFF':'ON';
-    toggle.onclick=async()=>{
-      const enabled=person.enabled===false;toggle.disabled=true;
-      try{
-        await persist(current=>{
-          const next=structuredClone(current);
-          const settings=scope?next.scopes.find(entry=>entry.key===scope.key)?.settings:next;
-          const profile=settings?.profiles.find(entry=>entry.id===person.id);
-          if(profile)profile.enabled=enabled;
-          return next;
-        });
-        message('');
-      }catch(error){message(error.message,true);refreshUI();}
-    };
-    actions.append(toggle);
-    const edit=document.createElement('button');edit.type='button';edit.textContent='편집';
-    edit.setAttribute('aria-label',`${person.name} ${scope?'전용':'공통'} 편집`);edit.onclick=()=>editPerson(person,scope);actions.append(edit);
-    row.append(makeAvatar(person.name,profileImage(person),person),info,actions);list.append(row);
+  const query=normalizeName(panel.querySelector('[data-search]')?.value??'').toLowerCase();
+  let shown=0;
+  for(const {person,row} of libraryRows){
+    const match=!query||[person.name,...person.aliases].some(name=>name.toLowerCase().includes(query));
+    row.hidden=!match;if(match)shown++;
   }
+  panel.querySelector('[data-count]').textContent=query?`${shown} / ${all.length}명`:`${all.length}명`;
+  let empty=list.querySelector('.sp-empty');
+  if(shown){empty?.remove();return;}
+  if(!empty){empty=document.createElement('p');empty.className='sp-empty';list.append(empty);}
+  empty.textContent=query?'검색과 일치하는 이름이 없어요.':'이름을 등록하고 사진을 연결해 주세요.';
 }
 function sourceOptions(){
   const select=panel.querySelector('[data-source]');select.replaceChildren(new Option('ST에 등록된 사진 선택',''));
-  const context=ctx();
-  for(const [i,char] of (context.characters??[]).entries()){
-    if(char?.avatar)select.add(new Option(`캐릭터 · ${char.name??char.data?.name??char.avatar}`,`character:${i}`));
+  const entries=[
+    ...(ctx().characters??[]).map((character,index)=>character?.avatar
+      ? {kind:'캐릭터',name:character.name??character.data?.name??character.avatar,file:character.avatar,value:`character:${index}`} : null).filter(Boolean),
+    ...personaList().map(entry=>({kind:'유저',name:entry.name,file:entry.file,value:`persona:${entry.file}`})),
+  ];
+  const seen=new Map();
+  for(const entry of entries)seen.set(entry.name,(seen.get(entry.name)??0)+1);
+  for(const entry of entries){
+    // Several cards or personas can share one name; the file tells them apart.
+    const stem=entry.file.replace(/\.[^.]+$/u,'').slice(0,24);
+    select.add(new Option(seen.get(entry.name)>1?`${entry.kind} · ${entry.name} (${stem})`:`${entry.kind} · ${entry.name}`,entry.value));
   }
-  for(const [avatar,value] of Object.entries(context.powerUserSettings?.personas??{})){
-    const name=typeof value==='string'?value:value?.name;
-    if(name)select.add(new Option(`유저 · ${name}`,`persona:${avatar}`));
-  }
+  select.value=sourceValue(draft?.photoSource);
+}
+/** The dropdown is built at once, then again if the avatar file list arrives late. */
+function openSourceOptions(){
+  sourceOptions();
+  refreshUserAvatars().then(()=>{if(draft&&panel)sourceOptions();});
 }
 function editPerson(person,scope=null){
   if(draft&&!confirm('저장하지 않은 편집을 닫고 다른 인물을 열까요?'))return;
   original=person?{id:person.id,key:scope?.key??''}:null;
   draft=person?structuredClone(person):{id:uid(),name:'',aliases:[],image:'',zoom:1.25,x:50,y:35};
+  if(!person){const source=currentPhotoSource();if(source)draft.photoSource=source;}
   panel.querySelector('.sp-editor').hidden=false;
   panel.querySelector('[data-names]').value=[draft.name,...draft.aliases].filter(Boolean).join(', ');
   panel.querySelector('[data-mask-person]').checked=draft.hideWhenMasked===true;
@@ -218,7 +311,9 @@ function editPerson(person,scope=null){
   select.value=scope||(!person&&activeScope)?'local':'global';
   panel.querySelector('[data-delete]').hidden=!original;
   panel.querySelector('[data-editor-title]').textContent=person?'인물 편집':'새 인물';
-  sourceOptions();scopeHint();preview();message('');panel.querySelector('[data-names]').focus();
+  openSourceOptions();scopeHint();preview();
+  message(!person&&draft.photoSource?'현재 봇·페르소나 사진을 기본으로 넣었어요. 아래에서 다른 사진을 고르거나 직접 올릴 수 있어요.':'');
+  panel.querySelector('[data-names]').focus();
 }
 function scopeHint(){
   const local=panel.querySelector('[data-person-scope]').value==='local';
@@ -304,6 +399,12 @@ async function importBackup(file){
   message(`${added}명 추가${skipped?` · 같은 범위의 중복 이름 또는 한도 초과 ${skipped}명은 건너뛰었어요.`:'했어요.'}`);
 }
 
+// Each toolbar's 기본값 button restores exactly the keys that toolbar owns.
+const RESET_GROUPS={
+  bubble:['bubbleColorEnabled','bubbleColor','bubbleOpacity'],
+  colors:['quoteColorEnabled','quoteColor','emphasisColorEnabled','emphasisColor','parenColorEnabled','parenColor'],
+  border:['borderEnabled','borderColor','borderWidth'],
+};
 function mount(){
   if(panel)return;
   const container=document.querySelector('#extensions_settings2')??document.querySelector('#extensions_settings');
@@ -327,7 +428,7 @@ function mount(){
     <p class="sp-muted" id="sp-render-depth-help">렌더링할 메시지 수를 최신 메시지부터 세어 설정합니다. 0이면 모든 메시지를 렌더링합니다.</p>
     <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
     <div class="sp-bubble-settings" data-bubble-settings hidden>
-      <label class="sp-check"><input type="checkbox" data-bubble-enabled> 말풍선 배경 직접 설정</label>
+      <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-bubble-enabled> 말풍선 배경 직접 설정</label><button type="button" class="sp-reset" data-reset="bubble">기본값으로</button></div>
       <div class="sp-bubble-settings" data-bubble-fields hidden>
         <label class="sp-check">배경 색상 <input type="color" data-bubble-color aria-label="말풍선 배경 색상"></label>
         <label class="sp-range">불투명도<input type="range" min="0" max="100" step="1" data-bubble-opacity aria-label="말풍선 배경 불투명도"><output data-bubble-opacity-output></output></label>
@@ -335,9 +436,17 @@ function mount(){
       </div>
     </div>
     <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
+    <div class="sp-border-settings">
+      <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-border-enabled> 프사 테두리 직접 설정</label><button type="button" class="sp-reset" data-reset="border">기본값으로</button></div>
+      <div class="sp-border-settings" data-border-fields hidden>
+        <label class="sp-check">테두리 색상 <input type="color" data-border-color aria-label="프사 테두리 색상"></label>
+        <label class="sp-range">테두리 굵기<input type="range" min="0" max="6" step="1" data-border-width aria-label="프사 테두리 굵기"><output data-border-width-output></output></label>
+        <p class="sp-muted">0px는 테두리 없음입니다. 직접 설정을 끄면 테마 기본 테두리로 돌아갑니다.</p>
+      </div>
+    </div>
     <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
     <label class="sp-field">따옴표 스타일<select data-quote-style><option value="theme">현재 ST 테마 그대로</option><option value="override">덮어쓰기 · 확장 스타일 우선</option></select></label>
-    <details class="sp-font-settings"><summary>폰트 설정</summary><div class="sp-font-panel">
+    <details class="sp-font-settings"><summary>폰트 · 글자 색상 설정</summary><div class="sp-font-panel">
       <label class="sp-field">폰트 적용<select data-font-mode><option value="theme">ST 설정 따르기</option><option value="custom">직접 선택</option></select></label>
       <div class="sp-options" data-font-fields hidden>
         <label>이름 폰트<select data-name-font>${FONT_OPTIONS.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label>
@@ -345,9 +454,15 @@ function mount(){
         <label class="sp-font-size">이름 크기<input type="range" data-name-size min="10" max="28" step="1" aria-label="이름 폰트 크기"><output data-name-size-output></output></label>
         <label class="sp-font-size">대사 크기<input type="range" data-dialogue-size min="12" max="36" step="1" aria-label="대사 폰트 크기"><output data-dialogue-size-output></output></label>
       </div>
-      <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-color-enabled> 따옴표 대사 색상</label><input type="color" data-quote-color aria-label="따옴표 대사 색상 선택"></div>
+      <div class="sp-color-rows">
+        <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-color-enabled> 따옴표 “대사” 색상</label><input type="color" data-quote-color aria-label="따옴표 대사 색상 선택"></div>
+        <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-emphasis-enabled> 강조 *글* 색상</label><input type="color" data-emphasis-color aria-label="강조 글 색상 선택"></div>
+        <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-paren-enabled> 괄호 (글) 색상</label><input type="color" data-paren-color aria-label="괄호 글 색상 선택"></div>
+        <p class="sp-muted">*기울임*과 (괄호) · （괄호） 안의 글자 색을 따로 정합니다. 따옴표 안에 들어 있어도 강조·괄호 색이 우선입니다.</p>
+        <div class="sp-toolbar"><button type="button" class="sp-reset" data-reset="colors">글자 색상 기본값으로</button></div>
+      </div>
     </div></details>
-    <div class="sp-toolbar"><h4>등록된 인물 <span class="sp-muted" data-count></span></h4><button type="button" data-add>＋ 인물 추가</button></div>
+    <div class="sp-toolbar"><h4>등록된 인물 <span class="sp-muted" data-count></span></h4><input type="text" class="sp-search" data-search placeholder="이름 검색" aria-label="등록된 인물 이름 검색"><button type="button" data-add>＋ 인물 추가</button></div>
     <div class="sp-library"></div>
     <section class="sp-editor" hidden>
       <div class="sp-editor-head"><h4 data-editor-title>새 인물</h4><button type="button" data-cancel aria-label="인물 편집 취소">닫기</button></div>
@@ -415,18 +530,30 @@ function mount(){
     ['select[data-name-position]','namePosition'],['select[data-quote-style]','quoteStyle'],
     ['[data-font-mode]','fontMode'],['[data-name-font]','nameFont'],['[data-dialogue-font]','dialogueFont'],
     ['[data-color-enabled]','quoteColorEnabled',true],['[data-quote-color]','quoteColor'],
+    ['[data-emphasis-enabled]','emphasisColorEnabled',true],['[data-emphasis-color]','emphasisColor'],
+    ['[data-paren-enabled]','parenColorEnabled',true],['[data-paren-color]','parenColor'],
     ['[data-name-size]','nameFontSize'],['[data-dialogue-size]','dialogueFontSize'],
     ['[data-design]','design'],['[data-shape]','shape'],['[data-size]','size'],
+    ['[data-border-enabled]','borderEnabled',true],['[data-border-color]','borderColor'],['[data-border-width]','borderWidth'],
   ])panel.querySelector(selector).addEventListener('change',async event=>{
-    const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize','renderDepth','bubbleOpacity'].includes(key)?Number(event.target.value):event.target.value;
+    const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize','renderDepth','bubbleOpacity','borderWidth'].includes(key)?Number(event.target.value):event.target.value;
     try{await persist(current=>({...current,[key]:value}),[],key!=='renderDepth');message('');}
     catch(error){message(error.message,true);refreshUI();}
   });
   panel.querySelector('[data-bubble-opacity]').oninput=event=>{panel.querySelector('[data-bubble-opacity-output]').textContent=event.target.value+'%';};
+  panel.querySelector('[data-border-width]').oninput=event=>{panel.querySelector('[data-border-width-output]').textContent=event.target.value+'px';};
+  for(const button of panel.querySelectorAll('[data-reset]'))button.onclick=async()=>{
+    const keys=RESET_GROUPS[button.dataset.reset];
+    try{
+      await persist(current=>({...current,...Object.fromEntries(keys.map(key=>[key,DEFAULT_SETTINGS[key]]))}));
+      message('기본값으로 되돌렸어요.');
+    }catch(error){message(error.message,true);refreshUI();}
+  };
   panel.querySelector('[data-size]').oninput=event=>{panel.querySelector('[data-size-output]').textContent=`${event.target.value}px`;};
   for(const key of ['name','dialogue'])panel.querySelector(`[data-${key}-size]`).oninput=event=>{
     panel.querySelector(`[data-${key}-size-output]`).textContent=event.target.value+'px';
   };
+  panel.querySelector('[data-search]').oninput=library;
   panel.querySelector('[data-add]').onclick=()=>editPerson();
   panel.querySelector('[data-cancel]').onclick=closeEditor;
   panel.querySelector('[data-person-scope]').onchange=scopeHint;
@@ -442,13 +569,15 @@ function mount(){
     try{const image=await readImage(event.target.files[0]);if(image&&draft===editing){draft.image=image;delete draft.photoSource;preview();message('사진을 불러왔어요. 저장하면 대사에 적용됩니다.');}}
     catch(error){message(error.message,true);}finally{event.target.value='';}
   };
-  panel.querySelector('[data-source]').onchange=async()=>{
+  panel.querySelector('[data-source]').onchange=()=>{
+    if(!draft)return;
     const value=panel.querySelector('[data-source]').value;
-    if(!value)return;
+    if(!value){delete draft.photoSource;draft.image='';preview();message('ST 사진 연결을 해제했어요. 사진을 직접 넣거나 다시 골라 주세요.');return;}
     const colon=value.indexOf(':'),type=value.slice(0,colon),id=value.slice(colon+1);
-    const source=type==='character'?ctx().characters[Number(id)]?.avatar:id,editing=draft;
+    const source=type==='character'?ctx().characters[Number(id)]?.avatar:id;
     if(!source)return;
-    if(draft===editing){draft.photoSource={type:type==='character'?'avatar':'persona',file:source};draft.image='';preview();message('ST 원본 사진을 연결했어요. 저장을 눌러 주세요.');}
+    draft.photoSource={type:type==='character'?'avatar':'persona',file:source};draft.image='';
+    preview();message('ST 원본 사진을 연결했어요. 저장을 눌러 주세요.');
   };
   panel.querySelector('[data-delete]').onclick=async()=>{
     if(!draft||!original||!confirm(`“${draft.name}”의 이 범위 등록을 삭제할까요?`))return;
@@ -466,7 +595,12 @@ async function initialize(){
   const raw=ctx().extensionSettings[KEY]??DEFAULT_SETTINGS;
   storageId=typeof raw.storageId==='string'?raw.storageId:uid();
   store=sanitizeStore(raw);activeScope=getActiveScope(ctx());let storageError='';
-  try{const images=await imageStore();for(const person of allProfiles(store))person.image=person.photoSource?'':isServerImage(person.image)?person.image:(images[person.id]??person.image??'');store=sanitizeStore(store);imagesReady=true;}
+  try{
+    const images=await imageStore();
+    for(const person of allProfiles(store))person.image=person.photoSource?'':isServerImage(person.image)?person.image:(images[person.id]??person.image??'');
+    store=sanitizeStore(store);imagesReady=true;
+    storedImageKey=imageKey(Object.fromEntries(allProfiles(store).filter(p=>p.image?.startsWith('data:')).map(p=>[p.id,p.image])));
+  }
   catch{imagesReady=allProfiles(store).every(p=>isServerImage(p.image)||p.photoSource);if(!imagesReady)storageError='기존 브라우저 사진을 읽지 못했어요. 원래 브라우저의 저장소를 확인해 주세요.';}
   if(!ctx().extensionSettings[KEY]?.storageId){ctx().extensionSettings[KEY]={...store,storageId};ctx().saveSettingsDebounced();}
   renderer=createRenderer({getSettings:()=>store,getSources,getImage:result=>profileImage(result?.profile),getMaskState:()=>portraitsHidden});
@@ -483,6 +617,7 @@ async function initialize(){
     if(events[key])eventSource.on(events[key],()=>schedule());
   }
   if(events.APP_READY)eventSource.on(events.APP_READY,()=>{mount();changeContext();});
+  refreshUserAvatars().then(()=>{if(draft&&panel)sourceOptions();});
   observe();schedule(true);
 }
 initialize().catch(error=>console.error('[Name2Avatar] 초기화 오류',error));

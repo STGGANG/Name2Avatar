@@ -1,4 +1,4 @@
-import {isServerImage,normalizeServerImage} from './core.js';
+import {isServerImage,normalizeServerImage} from './core.js?v=1.2.1';
 export async function uploadPortrait(data,getHeaders,fetcher=fetch,baseURL=globalThis.location?.href){
   if(isServerImage(data)||!data)return data;
   const match=/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(data);

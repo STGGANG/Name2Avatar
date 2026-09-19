@@ -1,5 +1,5 @@
 /** Global settings remain in the v1 shape; bot/group overrides live in scopes. */
-import { normalizeName, sanitizeSettings } from './core.js?v=1.0.1-appearance';
+import { normalizeName, sanitizeSettings } from './core.js?v=1.2.1';
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const own = (value, key) => value !== null && typeof value === 'object'
