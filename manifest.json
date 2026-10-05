@@ -1,10 +1,10 @@
 {
-  "display_name": "이름 ➡ 프사 · Name2Avatar",
+  "display_name": "이름 ▸ 프사",
   "loading_order": 100,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "Name2Avatar",
-  "version": "1.1.1"
+  "version": "1.2.3"
 }

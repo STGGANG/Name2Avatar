@@ -1,5 +1,5 @@
-import { parseDialogueLine, resolveSpeaker, dialoguePrefix, normalizeName } from './core.js?v=1.2.1';
-import { applyTypography } from './typography.js?v=1.2.1';
+import { parseDialogueLine, resolveSpeaker, dialoguePrefix, normalizeName } from './core.js?v=1.2.3';
+import { applyTypography } from './typography.js?v=1.2.3';
 
 const EXCLUDED='pre,code,style,script,textarea,iframe,svg,table,details,.mg-status,.speakers,.sp-line,[data-sp-skip]';
 const INLINE=new Set(['A','ABBR','B','BDI','BDO','CITE','DEL','EM','I','MARK','Q','S','SMALL','SPAN','STRONG','SUB','SUP','U']);
@@ -78,7 +78,7 @@ export function decorateLine(line,settings) {
 
 // Inline !important beats ordinary theme rules, even theme q rules using !important.
 // Only the cloned quote wrapper is reset; translation and emphasis children survive.
-function resetQuotes(content) {
+export function resetQuotes(content) {
   const reset={display:'inline',position:'static',float:'none',width:'auto',height:'auto',
     'min-width':'0','max-width':'none',margin:'0',padding:'0',border:'0',outline:'0',
     'border-radius':'0',background:'none','box-shadow':'none','text-shadow':'none',

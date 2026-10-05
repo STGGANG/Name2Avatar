@@ -5,8 +5,28 @@ const own = (value, key) => value !== null && typeof value === 'object'
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 const LEGACY_DIALOGUE_PROMPT = '# Dialogue Format\n- Output all dialogue as: `Speaker Name | "Dialogue"`\n- Add a blank line after each line.';
-export const DEFAULT_DIALOGUE_PROMPT = '# Dialogue Format\n\n- Output all dialogue as: `Speaker Name | "Dialogue"`\n- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.\n- Add a blank line after each line.';
-export const DEFAULT_DIALOGUE_PROMPT_B = '# Dialogue Format\n\n- Format: `Speaker Name | "Dialogue"`\n- Non-Korean speech = preserve the spoken language and append a Korean translation: `Speaker Name | "Original" (Korean translation)`\n- Keep original-language dialogue natural to the character\'s linguistic/cultural background, not literal Korean phrasing.\n- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.\n- Add a blank line after each line.';
+const PREVIOUS_DIALOGUE_PROMPT_A = '# Dialogue Format\n\n- Output all dialogue as: `Speaker Name | "Dialogue"`\n- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.\n- Add a blank line after each line.';
+const PREVIOUS_DIALOGUE_PROMPT_B = '# Dialogue Format\n\n- Format: `Speaker Name | "Dialogue"`\n- Non-Korean speech = preserve the spoken language and append a Korean translation: `Speaker Name | "Original" (Korean translation)`\n- Keep original-language dialogue natural to the character\'s linguistic/cultural background, not literal Korean phrasing.\n- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.\n- Add a blank line after each line.';
+export const DEFAULT_DIALOGUE_PROMPT = [
+    '# Dialogue Format',
+    '- Default (KR/EN/ETC): `Name | "Dialogue"`',
+    '- JP: `Surname | 「Dialogue」`',
+    '- Unnamed background, incidental, or passing characters: `"Dialogue"`; Only use names for established, story-relevant, or meaningful recurring/supporting characters.',
+    '- Add a blank line after each line.',
+].join('\n');
+export const DEFAULT_DIALOGUE_PROMPT_B = [
+    '# Dialogue Format',
+    '- Default (KR/EN/ETC): `Name | "Dialogue"`',
+    '- JP: `Surname | 「Dialogue」`',
+    '- Non-Korean dialogue must remain in the spoken language, followed by a Korean translation: `Name | "Original" (Korean translation)`',
+    "- Keep non-Korean dialogue natural to the character's linguistic/cultural background, not literal Korean phrasing.",
+    '- Unnamed incidental/background characters: dialogue only; name only established, relevant, or recurring/supporting characters.',
+    '- Leave one blank line after each line.',
+].join('\n');
+
+function migrateShippedPrompt(value, previous, current) {
+    return value === previous ? current : value;
+}
 export const DEFAULT_SETTINGS = Object.freeze({
     dialoguePromptEnabled: false,
     dialoguePrompt: DEFAULT_DIALOGUE_PROMPT,
@@ -160,7 +180,7 @@ function boundedNumber(value, min, max, fallback) {
 }
 
 export function isServerImage(value) {
-    return typeof value==='string' && value.length<2048 && /^(?:\/(?:[a-zA-Z0-9_-]+\/)*|)user\/images\/speaker-portraits\/sp-[a-zA-Z0-9_-]+\.(?:png|jpeg|webp)$/.test(value);
+    return typeof value==='string' && value.length<2048 && /^(?:\/(?:[a-zA-Z0-9_-]+\/)*|)user\/images\/speaker-portraits\/sp-[a-zA-Z0-9_-]+\.(?:png|jpeg|webp|gif)$/.test(value);
 }
 
 /** Normalize only same-origin web paths, never filesystem paths or external hosts. */
@@ -189,7 +209,7 @@ export function safePhotoSource(value){
 function safeImage(value) {
     if(isServerImage(value))return value;
     if (typeof value !== 'string' || value.length > 8_000_000) return '';
-    const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/iu.exec(value);
+    const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/iu.exec(value);
     if (!match || match[2].length % 4 !== 0) return '';
     return `data:image/${match[1].toLowerCase()};base64,${match[2]}`;
 }
@@ -203,13 +223,20 @@ export function sanitizeSettings(input) {
     const design = own(source, 'design');
     const shape = own(source, 'shape');
     const storedPrompt = own(source, 'dialoguePrompt');
-    const legacyPrompt = typeof storedPrompt === 'string' && storedPrompt.trim() !== LEGACY_DIALOGUE_PROMPT
-        ? storedPrompt.slice(0, 8000) : DEFAULT_DIALOGUE_PROMPT;
+    const legacyPrompt = typeof storedPrompt === 'string'
+        ? (storedPrompt === LEGACY_DIALOGUE_PROMPT
+            ? DEFAULT_DIALOGUE_PROMPT
+            : migrateShippedPrompt(storedPrompt.slice(0, 8000), PREVIOUS_DIALOGUE_PROMPT_A, DEFAULT_DIALOGUE_PROMPT))
+        : DEFAULT_DIALOGUE_PROMPT;
     const slots = own(source, 'dialoguePrompts');
     const dialoguePromptPreset = own(source, 'dialoguePromptPreset') === 'B' ? 'B' : 'A';
     const dialoguePrompts = {
-        A: typeof own(slots, 'A') === 'string' ? own(slots, 'A').slice(0, 8000) : legacyPrompt,
-        B: typeof own(slots, 'B') === 'string' ? own(slots, 'B').slice(0, 8000) : DEFAULT_DIALOGUE_PROMPT_B,
+        A: typeof own(slots, 'A') === 'string'
+            ? migrateShippedPrompt(own(slots, 'A').slice(0, 8000), PREVIOUS_DIALOGUE_PROMPT_A, DEFAULT_DIALOGUE_PROMPT)
+            : legacyPrompt,
+        B: typeof own(slots, 'B') === 'string'
+            ? migrateShippedPrompt(own(slots, 'B').slice(0, 8000), PREVIOUS_DIALOGUE_PROMPT_B, DEFAULT_DIALOGUE_PROMPT_B)
+            : DEFAULT_DIALOGUE_PROMPT_B,
     };
     const settings = {
         dialoguePromptPreset,

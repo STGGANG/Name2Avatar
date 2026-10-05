@@ -1,11 +1,11 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.2.1';
-import { syncDialoguePrompt } from './prompt.js?v=1.2.1';
-import { createRenderer, makeAvatar, applyCrop, decorateLine } from './renderer.js?v=1.2.1';
-import { createChatRenderer } from './chat-renderer.js?v=1.2.1';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.2.1';
-import { bindCropDrag } from './crop.js?v=1.2.1';
-import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.2.1';
-import {uploadPortrait,portableImage} from './server-images.js?v=1.2.1';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.2.3';
+import { syncDialoguePrompt } from './prompt.js?v=1.2.3';
+import { createRenderer, makeAvatar, applyCrop, decorateLine, resetQuotes } from './renderer.js?v=1.2.3';
+import { createChatRenderer } from './chat-renderer.js?v=1.2.3';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.2.3';
+import { bindCropDrag } from './crop.js?v=1.2.3';
+import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.2.3';
+import {uploadPortrait,portableImage,portableSourceGif} from './server-images.js?v=1.2.3';
 
 // Keep the v1 storage key and profile IDs so existing names and photos survive upgrades.
 const KEY='speaker_portraits_v1';
@@ -15,6 +15,9 @@ let store,storageId,panel,draft=null,original=null,activeScope=null,renderer,cha
 let needsReset=false,imagesReady=false,saveQueue=Promise.resolve();
 let storedImageKey=null,librarySignature=null,libraryRows=[],sourcesCache=null;
 let portraitsHidden=false;
+// Keep edits for both prompt presets in memory while the drawer is open.
+const promptDrafts=new Map();
+let promptBusy=false;
 
 const database=new Promise((resolve,reject)=>{
   const request=indexedDB.open('st-speaker-portraits',1);
@@ -80,6 +83,34 @@ function message(text,error=false){
   const status=panel?.querySelector('.sp-message');
   if(status){status.textContent=text;status.dataset.error=String(error);}
 }
+function promptState(){
+  const state=panel?.querySelector('[data-prompt-state]');
+  if(!state)return;
+  for(const button of panel.querySelectorAll('[data-prompt-preset]')){
+    const preset=button.dataset.promptPreset,dirty=promptDrafts.has(preset);
+    button.dataset.dirty=String(dirty);
+    button.setAttribute('aria-label',`프롬 ${preset}${dirty?', 저장 전 변경 사항':''}`);
+  }
+  const cardState=panel.querySelector('[data-prompt-card-dirty]');
+  cardState.hidden=promptDrafts.size===0;
+  cardState.textContent=promptDrafts.size===2?'프롬 A/B 저장 전 수정':'저장 전 수정 있음';
+  const preset=store.dialoguePromptPreset;
+  const dirty=promptDrafts.has(preset);
+  state.dataset.dirty=String(dirty);
+  state.textContent=dirty?`프롬${preset} · 저장 전 변경 사항`:`프롬${preset} · 저장됨`;
+}
+function setPromptBusy(busy){
+  promptBusy=busy;
+  for(const control of panel.querySelectorAll('[data-prompt-text],[data-prompt-preset],[data-prompt-save],[data-prompt-reset]'))
+    control.disabled=busy;
+}
+function recordPromptDraft(){
+  const preset=store.dialoguePromptPreset;
+  const value=panel.querySelector('[data-prompt-text]').value;
+  if(value===store.dialoguePrompts[preset])promptDrafts.delete(preset);
+  else promptDrafts.set(preset,value);
+  promptState();
+}
 function refreshPortraitMask(){
   const checkbox=panel?.querySelector('[data-hide-portraits]');
   if(checkbox)checkbox.checked=portraitsHidden;
@@ -94,7 +125,23 @@ function imageKey(images){
   return Object.keys(images).sort().map(id=>`${id}:${images[id].length}:${images[id].slice(-24)}`).join('|');
 }
 /** Serialize mutations against the latest committed store, not a stale UI snapshot. */
-function persist(update,uploadIds=[],reset=true){
+function panelScrollPositions(){
+  const positions=[];
+  const drawerContent=panel?.querySelector('.inline-drawer-content');
+  if(drawerContent?.scrollHeight>drawerContent.clientHeight+1)
+    positions.push({node:drawerContent,top:drawerContent.scrollTop,left:drawerContent.scrollLeft});
+  for(let node=panel?.parentElement;node;node=node.parentElement){
+    if(node.scrollHeight>node.clientHeight+1)positions.push({node,top:node.scrollTop,left:node.scrollLeft});
+  }
+  const root=document.scrollingElement;
+  if(root&&!positions.some(entry=>entry.node===root)&&root.scrollHeight>root.clientHeight+1)
+    positions.push({node:root,top:root.scrollTop,left:root.scrollLeft});
+  return positions;
+}
+function restorePanelScroll(positions){
+  for(const {node,top,left} of positions){node.scrollTop=top;node.scrollLeft=left;}
+}
+function persist(update,uploadIds=[],reset=true,keepScroll=true){
   const operation=saveQueue.catch(()=>{}).then(async()=>{
     if(!imagesReady)throw new Error('사진 저장소를 읽지 못해 저장을 중단했어요. 브라우저 저장소를 확인한 뒤 새로고침해 주세요.');
     const clean=sanitizeStore(update(store));
@@ -114,7 +161,12 @@ function persist(update,uploadIds=[],reset=true){
     storedImageKey=key;
     ctx().extensionSettings[KEY]=metadata;
     ctx().saveSettingsDebounced();
+    const scroll=keepScroll?panelScrollPositions():null;
     store=clean;syncDialoguePrompt(ctx(),store);refreshUI();schedule(reset);
+    if(scroll){
+      restorePanelScroll(scroll);
+      requestAnimationFrame(()=>{if(panel?.isConnected)restorePanelScroll(scroll);});
+    }
   });
   saveQueue=operation;
   return operation;
@@ -127,6 +179,7 @@ function refreshUI(){
     const selected=button.dataset.promptPreset===store.dialoguePromptPreset;
     button.setAttribute('aria-pressed',String(selected));button.classList.toggle('sp-primary',selected);
   }
+  promptState();
   for(const [selector,key,boolean] of [
     ['[data-enabled]','enabled',true],
     ['[data-render-depth]','renderDepth'],
@@ -158,12 +211,14 @@ function refreshUI(){
   panel.querySelector('[data-paren-color]').disabled=!store.parenColorEnabled;
   panel.querySelector('[data-name-size-output]').textContent=store.nameFontSize+'px';
   panel.querySelector('[data-dialogue-size-output]').textContent=store.dialogueFontSize+'px';
-  library();if(draft)preview();
+  library();livePreview();if(draft)preview();
 }
 function changeContext(){
   const next=getActiveScope(ctx());
   const changed=(next?.key??'')!==(activeScope?.key??'');activeScope=next;
   if(changed&&draft){closeEditor();message('봇이 바뀌어 저장 전 편집을 닫았어요. 다시 이름을 선택해 주세요.');}
+  if(!activeScope&&panel?.querySelector('[data-scope-filter="local"][aria-pressed="true"]'))
+    selectScopeFilter('all');
   refreshUI();schedule(changed);
 }
 function observe(){
@@ -192,18 +247,34 @@ function syncCrop(){
     panel.querySelector(`[data-crop="${key}"]`).value=draft[key];
     panel.querySelector(`[data-output="${key}"]`).textContent=key==='zoom'?`${draft[key].toFixed(2)}×`:`${draft[key]}%`;
   }
-  for(const img of panel.querySelectorAll('.sp-preview img,.sp-crop-stage img'))applyCrop(img,draft);
+  for(const img of panel.querySelectorAll('.sp-preview img,.sp-crop-stage img,.sp-live-preview img'))applyCrop(img,draft);
+}
+function previewLine(person,settings=store){
+  const line=document.createElement('span');line.className='sp-line';decorateLine(line,settings);
+  const body=document.createElement('span');body.className='sp-body';
+  const name=document.createElement('span');name.className='sp-name';name.textContent=person.name||'예시 인물';
+  const words=document.createElement('span');words.className='sp-words';
+  const quote=document.createElement('q');quote.textContent='여기서 다시 만나네요.';
+  const emphasis=document.createElement('em');emphasis.textContent='살짝 웃으며';
+  words.append(quote,' ',emphasis,' (번역 미리보기)');
+  if(settings.quoteStyle==='override')resetQuotes(words);
+  body.append(name,words);line.append(makeAvatar(person.name||'예시 인물',profileImage(person),person),body);applyTypography(line,settings);
+  return line;
+}
+function livePreview(settings=store,keepScroll=false){
+  const target=panel?.querySelector('.sp-live-preview');
+  if(!target)return;
+  const scroll=keepScroll?panelScrollPositions():null;
+  const sources=freshSources();
+  const person=draft??[...sources.scopedProfiles,...sources.profiles].find(entry=>entry.enabled!==false)
+    ??{name:'예시 인물',image:''};
+  target.replaceChildren(previewLine(person,settings));
+  if(scroll)restorePanelScroll(scroll);
 }
 function preview(){
   if(!draft)return;
-  const line=document.createElement('span');line.className='sp-line';decorateLine(line,store);
-  const body=document.createElement('span');body.className='sp-body';
-  const name=document.createElement('span');name.className='sp-name';name.textContent=draft.name||'이름';
-  const words=document.createElement('span');words.className='sp-words';
-  const emphasis=document.createElement('em');emphasis.textContent='살짝 웃으며';
-  words.append('“여기서 다시 만나네요.” ',emphasis,' (번역 미리보기)');
-  body.append(name,words);line.append(makeAvatar(draft.name||'이름',profileImage(draft),draft),body);applyTypography(line,store);
-  panel.querySelector('.sp-preview').replaceChildren(line);
+  panel.querySelector('.sp-preview').replaceChildren(previewLine(draft));
+  livePreview();
   const photo=makeAvatar(draft.name||'이름',profileImage(draft),draft);
   photo.classList.add('sp-crop-photo');photo.removeAttribute('aria-hidden');
   photo.tabIndex=0;photo.setAttribute('role','group');
@@ -252,6 +323,11 @@ function librarySignatureOf(entries,scopeKey){
     person.enabled===false?0:1,person.hideWhenMasked?1:0,
     person.photoSource?`s${person.photoSource.type}/${person.photoSource.file}`:`i${person.image.length}${person.image.slice(-16)}`].join('\u0002')).join('\u0003');
 }
+function selectScopeFilter(filter){
+  for(const button of panel.querySelectorAll('[data-scope-filter]'))
+    button.setAttribute('aria-pressed',String(button.dataset.scopeFilter===filter));
+  library();
+}
 function library(){
   const list=panel.querySelector('.sp-library');
   const local=store.scopes.find(scope=>scope.key===activeScope?.key);
@@ -265,16 +341,23 @@ function library(){
     list.replaceChildren(...libraryRows.map(entry=>entry.row));
   }
   const query=normalizeName(panel.querySelector('[data-search]')?.value??'').toLowerCase();
+  const filter=panel.querySelector('[data-scope-filter][aria-pressed="true"]')?.dataset.scopeFilter??'all';
   let shown=0;
-  for(const {person,row} of libraryRows){
-    const match=!query||[person.name,...person.aliases].some(name=>name.toLowerCase().includes(query));
+  for(const {person,scope,row} of libraryRows){
+    const matchesName=!query||[person.name,...person.aliases]
+      .some(name=>normalizeName(name).toLowerCase().includes(query));
+    const match=matchesName&&(filter==='all'||(filter==='local')===Boolean(scope));
     row.hidden=!match;if(match)shown++;
   }
-  panel.querySelector('[data-count]').textContent=query?`${shown} / ${all.length}명`:`${all.length}명`;
+  panel.querySelector('[data-count]').textContent=query||filter!=='all'?`${shown} / ${all.length}명`:`${all.length}명`;
+  panel.querySelector('[data-total-count]').textContent=String(all.length);
+  const localButton=panel.querySelector('[data-scope-filter="local"]');
+  localButton.textContent=activeScope?.key.startsWith('group:')?'현재 그룹':'현재 봇';
+  localButton.disabled=!activeScope;
   let empty=list.querySelector('.sp-empty');
   if(shown){empty?.remove();return;}
   if(!empty){empty=document.createElement('p');empty.className='sp-empty';list.append(empty);}
-  empty.textContent=query?'검색과 일치하는 이름이 없어요.':'이름을 등록하고 사진을 연결해 주세요.';
+  empty.textContent=all.length?query?'검색과 일치하는 이름이 없어요.':'이 범위에 등록된 인물이 없어요.':'이름을 등록하고 사진을 연결해 주세요.';
 }
 function sourceOptions(){
   const select=panel.querySelector('[data-source]');select.replaceChildren(new Option('ST에 등록된 사진 선택',''));
@@ -302,7 +385,7 @@ function editPerson(person,scope=null){
   original=person?{id:person.id,key:scope?.key??''}:null;
   draft=person?structuredClone(person):{id:uid(),name:'',aliases:[],image:'',zoom:1.25,x:50,y:35};
   if(!person){const source=currentPhotoSource();if(source)draft.photoSource=source;}
-  panel.querySelector('.sp-editor').hidden=false;
+  const editor=panel.querySelector('.sp-editor');editor.hidden=false;
   panel.querySelector('[data-names]').value=[draft.name,...draft.aliases].filter(Boolean).join(', ');
   panel.querySelector('[data-mask-person]').checked=draft.hideWhenMasked===true;
   const select=panel.querySelector('[data-person-scope]');
@@ -312,16 +395,17 @@ function editPerson(person,scope=null){
   panel.querySelector('[data-delete]').hidden=!original;
   panel.querySelector('[data-editor-title]').textContent=person?'인물 편집':'새 인물';
   openSourceOptions();scopeHint();preview();
-  message(!person&&draft.photoSource?'현재 봇·페르소나 사진을 기본으로 넣었어요. 아래에서 다른 사진을 고르거나 직접 올릴 수 있어요.':'');
+  message('');
+  editor.scrollIntoView({block:'nearest'});
   panel.querySelector('[data-names]').focus();
 }
 function scopeHint(){
   const local=panel.querySelector('[data-person-scope]').value==='local';
   panel.querySelector('[data-person-scope-note]').textContent=local
-    ? '이 봇과 연결 된 채팅에서만 사용합니다. 같은 이름의 공통 등록이 있어도 이 사진을 우선해요.'
-    : '모든 봇에 적용합니다. 특정 봇에 같은 이름의 전용 등록이 있으면 그쪽을 우선해요.';
+    ? '현재 봇에만 적용 · 같은 이름의 공통 등록보다 우선'
+    : '모든 봇에 적용 · 같은 이름의 전용 등록이 있으면 전용 우선';
 }
-function closeEditor(){draft=null;original=null;panel.querySelector('.sp-editor').hidden=true;}
+function closeEditor(){draft=null;original=null;panel.querySelector('.sp-editor').hidden=true;livePreview();}
 async function saveProfile(){
   if(!draft)return;
   const names=parseNames(panel.querySelector('[data-names]').value);
@@ -350,17 +434,36 @@ async function decodeImage(url){
 }
 async function readImage(file){
   if(!file)return;
-  if(!['image/png','image/jpeg','image/webp'].includes(file.type))throw new Error('PNG, JPG, WebP 이미지를 선택해 주세요.');
-  if(file.size>15*1024*1024)throw new Error('15MB 이하 이미지를 선택해 주세요.');
+  const animated=file.type==='image/gif';
+  if(!['image/png','image/jpeg','image/webp','image/gif'].includes(file.type))throw new Error('PNG, JPG, WebP, GIF 이미지를 선택해 주세요.');
+  if(animated&&file.size>5_500_000)throw new Error('움직이는 GIF는 5.5MB 이하 파일을 선택해 주세요.');
+  if(!animated&&file.size>15*1024*1024)throw new Error('15MB 이하 이미지를 선택해 주세요.');
+  if(animated){
+    const header=String.fromCharCode(...new Uint8Array(await file.slice(0,6).arrayBuffer()));
+    if(header!=='GIF87a'&&header!=='GIF89a')throw new Error('올바른 GIF 파일이 아니에요.');
+  }
   const url=URL.createObjectURL(file);
-  try{return await decodeImage(url);}finally{URL.revokeObjectURL(url);}
+  try{
+    if(!animated)return await decodeImage(url);
+    const image=new Image();image.src=url;await image.decode();
+    if(!image.naturalWidth||!image.naturalHeight)throw new Error('GIF 이미지를 읽지 못했어요.');
+    return await new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>typeof reader.result==='string'&&reader.result.startsWith('data:image/gif;base64,')
+        ? resolve(reader.result):reject(new Error('GIF 파일을 읽지 못했어요.'));
+      reader.onerror=()=>reject(reader.error??new Error('GIF 파일을 읽지 못했어요.'));
+      reader.readAsDataURL(file);
+    });
+  }finally{URL.revokeObjectURL(url);}
 }
 async function downloadBackup(){
   await saveQueue.catch(()=>{});
   if(!imagesReady){message('사진 저장소를 읽지 못해 완전한 백업을 만들 수 없어요. 저장소 설정을 확인한 뒤 새로고침해 주세요.',true);return;}
   const portable=structuredClone(store);
   for(const person of allProfiles(portable)){
-    person.image=person.photoSource?await decodeImage(profileImage(person)):await portableImage(person.image);
+    person.image=person.photoSource
+      ? (await portableSourceGif(person.photoSource,profileImage(person))||await decodeImage(profileImage(person)))
+      : await portableImage(person.image);
     delete person.photoSource;
   }
   const blob=new Blob([JSON.stringify({format:'speaker-portraits',version:2,settings:portable},null,2)],{type:'application/json'});
@@ -411,113 +514,173 @@ function mount(){
   if(!container)return;
   panel=document.createElement('div');panel.className='sp-settings';panel.id='speaker-portraits-settings';
   panel.innerHTML=`<div class="inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header" role="button" tabindex="0" aria-expanded="false" aria-controls="sp-drawer-content"><b>이름 ➡ 프사</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></div></div>
+    <div class="inline-drawer-toggle inline-drawer-header" role="button" tabindex="0" aria-expanded="false" aria-controls="sp-drawer-content"><b>이름 ▸ 프사</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></div></div>
     <div class="inline-drawer-content" id="sp-drawer-content"><div class="sp-panel">
-    <div class="sp-title-row"><h3>Name2Avatar</h3><p class="sp-muted">등록한 이름에, 원하는 사진을.</p></div>
-    <details class="sp-font-settings"><summary>대사 형식 · 프롬프트</summary><div class="sp-font-panel">
-      <p class="sp-muted">지원 형식: 이름 | "대사" · 이름: "대사" · [이름] "대사"<br>대사 뒤의 (번역·생각)이나 굵은 글씨도 유지합니다. 한 줄에 한 인물의 대사를 써 주세요.</p>
-      <label class="sp-check"><input type="checkbox" data-prompt-enabled> 대사 형식 프롬 적용</label>
-      <p class="sp-muted">켜면 저장된 내용을 다음 AI 요청부터 대화 끝부분에 전달합니다. 확장 비활성화 시에는 전달하지 않습니다.</p>
-      <label class="sp-field">프롬프트<textarea data-prompt-text rows="5" maxlength="8000" aria-label="대사 형식 프롬프트"></textarea></label>
-      <div class="sp-toolbar"><button type="button" data-prompt-preset="A" aria-pressed="true">프롬A</button><button type="button" data-prompt-preset="B" aria-pressed="false">프롬B</button><button type="button" data-prompt-save>저장</button><button type="button" data-prompt-reset>초기화</button></div>
-      <p class="sp-muted">선택한 프롬프트를 사용합니다. 저장·초기화는 선택한 칸에만 적용됩니다.</p>
-    </div></details>
-    <h4>전체 설정</h4>
-    <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-enabled> 확장 활성화</label><label class="sp-check" title="체크를 해제하거나 새로고침하면 원래 프사로 돌아옵니다."><input type="checkbox" data-hide-portraits> 지정 인물 프사만 가리기</label></div>
-    <label class="sp-field">렌더링 최대 깊이<input type="number" min="0" step="1" inputmode="numeric" data-render-depth aria-describedby="sp-render-depth-help"></label>
-    <p class="sp-muted" id="sp-render-depth-help">렌더링할 메시지 수를 최신 메시지부터 세어 설정합니다. 0이면 모든 메시지를 렌더링합니다.</p>
-    <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
-    <div class="sp-bubble-settings" data-bubble-settings hidden>
-      <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-bubble-enabled> 말풍선 배경 직접 설정</label><button type="button" class="sp-reset" data-reset="bubble">기본값으로</button></div>
-      <div class="sp-bubble-settings" data-bubble-fields hidden>
-        <label class="sp-check">배경 색상 <input type="color" data-bubble-color aria-label="말풍선 배경 색상"></label>
-        <label class="sp-range">불투명도<input type="range" min="0" max="100" step="1" data-bubble-opacity aria-label="말풍선 배경 불투명도"><output data-bubble-opacity-output></output></label>
-        <p class="sp-muted">0%는 완전 투명, 100%는 불투명합니다. 직접 설정을 끄면 기존 배경으로 돌아갑니다.</p>
-      </div>
-    </div>
-    <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
-    <div class="sp-border-settings">
-      <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-border-enabled> 프사 테두리 직접 설정</label><button type="button" class="sp-reset" data-reset="border">기본값으로</button></div>
-      <div class="sp-border-settings" data-border-fields hidden>
-        <label class="sp-check">테두리 색상 <input type="color" data-border-color aria-label="프사 테두리 색상"></label>
-        <label class="sp-range">테두리 굵기<input type="range" min="0" max="6" step="1" data-border-width aria-label="프사 테두리 굵기"><output data-border-width-output></output></label>
-        <p class="sp-muted">0px는 테두리 없음입니다. 직접 설정을 끄면 테마 기본 테두리로 돌아갑니다.</p>
-      </div>
-    </div>
-    <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
-    <label class="sp-field">따옴표 스타일<select data-quote-style><option value="theme">현재 ST 테마 그대로</option><option value="override">덮어쓰기 · 확장 스타일 우선</option></select></label>
-    <details class="sp-font-settings"><summary>폰트 · 글자 색상 설정</summary><div class="sp-font-panel">
-      <label class="sp-field">폰트 적용<select data-font-mode><option value="theme">ST 설정 따르기</option><option value="custom">직접 선택</option></select></label>
-      <div class="sp-options" data-font-fields hidden>
-        <label>이름 폰트<select data-name-font>${FONT_OPTIONS.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label>
-        <label>대사 폰트<select data-dialogue-font>${FONT_OPTIONS.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label>
-        <label class="sp-font-size">이름 크기<input type="range" data-name-size min="10" max="28" step="1" aria-label="이름 폰트 크기"><output data-name-size-output></output></label>
-        <label class="sp-font-size">대사 크기<input type="range" data-dialogue-size min="12" max="36" step="1" aria-label="대사 폰트 크기"><output data-dialogue-size-output></output></label>
-      </div>
-      <div class="sp-color-rows">
-        <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-color-enabled> 따옴표 “대사” 색상</label><input type="color" data-quote-color aria-label="따옴표 대사 색상 선택"></div>
-        <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-emphasis-enabled> 강조 *글* 색상</label><input type="color" data-emphasis-color aria-label="강조 글 색상 선택"></div>
-        <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-paren-enabled> 괄호 (글) 색상</label><input type="color" data-paren-color aria-label="괄호 글 색상 선택"></div>
-        <p class="sp-muted">*기울임*과 (괄호) · （괄호） 안의 글자 색을 따로 정합니다. 따옴표 안에 들어 있어도 강조·괄호 색이 우선입니다.</p>
-        <div class="sp-toolbar"><button type="button" class="sp-reset" data-reset="colors">글자 색상 기본값으로</button></div>
-      </div>
-    </div></details>
-    <div class="sp-toolbar"><h4>등록된 인물 <span class="sp-muted" data-count></span></h4><input type="text" class="sp-search" data-search placeholder="이름 검색" aria-label="등록된 인물 이름 검색"><button type="button" data-add>＋ 인물 추가</button></div>
-    <div class="sp-library"></div>
-    <section class="sp-editor" hidden>
-      <div class="sp-editor-head"><h4 data-editor-title>새 인물</h4><button type="button" data-cancel aria-label="인물 편집 취소">닫기</button></div>
-      <label class="sp-field">이름<textarea data-names maxlength="3500" placeholder="예: 제이스, Jace, 제이스 윌슨" aria-describedby="sp-names-help"></textarea></label>
-      <p class="sp-muted" id="sp-names-help">쉼표로 구분해 주세요. 대사 앞에 해당 이름이 나오면 사진으로 대체 표시합니다. 첫 이름은 목록의 대표 이름이에요.</p>
-      <label class="sp-field">이 인물의 적용 범위<select data-person-scope><option value="global">모든 봇 공통 적용</option><option value="local">현재 봇 전용</option></select></label>
-      <p class="sp-muted" data-person-scope-note></p>
-      <label class="sp-check"><input type="checkbox" data-mask-person> '지정 인물 프사만 가리기' 적용 대상</label>
-      <p class="sp-muted">체크하고 저장하면 '지정 인물 프사만 가리기' 를 눌렀을 때 이 인물의 대사 프사가 아이콘으로 바뀝니다.</p>
-      <div class="sp-toolbar"><button type="button" data-upload>사진 넣기</button><button type="button" data-clear-image>사진 지우기</button><span class="sp-muted">PNG · JPG · WebP</span></div>
-      <div class="sp-toolbar"><select data-source aria-label="ST 사진 선택"></select></div>
-      <div class="sp-crop-stage"></div>
-      <p class="sp-muted" id="sp-crop-help">사진을 드래그해 위치를 조절하세요. 마우스·터치·펜 또는 방향키로 이동하고, 아래 슬라이더로도 조절할 수 있어요.</p>
-      <label class="sp-range">가로 위치<input type="range" min="0" max="100" step="1" data-crop="x" aria-label="사진 가로 위치"><output data-output="x"></output></label>
-      <label class="sp-range">세로 위치<input type="range" min="0" max="100" step="1" data-crop="y" aria-label="사진 세로 위치"><output data-output="y"></output></label>
-      <label class="sp-range">확대<input type="range" min="1" max="3" step="0.05" data-crop="zoom" aria-label="사진 확대"><output data-output="zoom"></output></label>
-      <div class="sp-preview" aria-label="대사 디자인 미리보기"></div>
-      <div class="sp-toolbar"><button type="button" data-save class="sp-primary">저장</button><button type="button" data-reset-crop>위치 초기화</button><button type="button" data-delete hidden>인물 삭제</button></div>
-    </section>
-    <p class="sp-message" role="status" aria-live="polite"></p>
-    <div class="sp-footer"><div class="sp-toolbar"><button type="button" data-export>사진·이름 백업</button><button type="button" data-import>백업 파일 불러오기</button></div>
-    <p class="sp-muted">새 사진은 ST 서버에 저장됩니다. 같은 서버·계정에서 공유됩니다.</p></div>
-    <input type="file" data-image-file accept="image/png,image/jpeg,image/webp" hidden><input type="file" data-backup-file accept="application/json,.json" hidden>
-  </div></div></div>`;
+      <header class="sp-hero">
+        <div class="sp-hero-copy"><h3>이름 ▸ 프사</h3></div>
+        <div class="sp-hero-actions"><span class="sp-hero-status">현재 목록 <b data-total-count>0</b>명</span><label class="sp-check sp-hero-toggle"><input type="checkbox" data-enabled> 사용</label></div>
+      </header>
+      <p class="sp-message" role="status" aria-live="polite"></p>
+
+      <section class="sp-card sp-people-card" aria-labelledby="sp-people-title">
+        <div class="sp-card-head">
+          <div class="sp-title-row"><h4 id="sp-people-title">인물 관리</h4><details class="sp-info"><summary aria-label="인물 관리 설명">!</summary><div class="sp-info-bubble" role="note">대사 앞의 이름을 등록한 사진에 연결합니다. 현재 봇 전용 등록은 같은 이름의 공통 등록보다 우선합니다.</div></details></div>
+          <button type="button" data-add class="sp-primary">＋ 인물 추가</button>
+        </div>
+        <div class="sp-toolbar sp-people-controls">
+          <input type="text" class="sp-search" data-search placeholder="이름 또는 별칭 검색" aria-label="등록된 인물 이름 검색">
+          <div class="sp-filter-group" role="group" aria-label="인물 적용 범위 필터">
+            <button type="button" data-scope-filter="all" aria-pressed="true">전체</button>
+            <button type="button" data-scope-filter="local" aria-pressed="false">현재 봇</button>
+            <button type="button" data-scope-filter="global" aria-pressed="false">공통</button>
+          </div>
+        </div>
+        <section class="sp-editor" aria-label="인물 편집" hidden>
+          <div class="sp-editor-head"><h4 data-editor-title>새 인물</h4><button type="button" data-cancel aria-label="인물 편집 취소">닫기</button></div>
+          <label class="sp-field">이름<textarea data-names maxlength="3500" placeholder="예: 제이스, Jace, 제이스 윌슨" aria-describedby="sp-names-help"></textarea></label>
+          <p class="sp-muted" id="sp-names-help">별칭은 쉼표로 구분 · 첫 이름이 대표 이름</p>
+          <label class="sp-field">이 인물의 적용 범위<select data-person-scope><option value="global">모든 봇 공통 적용</option><option value="local">현재 봇 전용</option></select></label>
+          <p class="sp-muted" data-person-scope-note></p>
+          <label class="sp-check"><input type="checkbox" data-mask-person> '지정 인물 프사만 가리기' 적용 대상</label>
+          <div class="sp-toolbar"><button type="button" data-upload>사진 넣기</button><button type="button" data-clear-image>사진 지우기</button><span class="sp-muted">PNG · JPG · WebP · GIF (5.5MB 이하)</span></div>
+          <div class="sp-toolbar"><select data-source aria-label="ST 사진 선택"></select></div>
+          <div class="sp-crop-stage"></div>
+          <p class="sp-muted" id="sp-crop-help">드래그 또는 방향키로 사진 이동</p>
+          <label class="sp-range">가로 위치<input type="range" min="0" max="100" step="1" data-crop="x" aria-label="사진 가로 위치"><output data-output="x"></output></label>
+          <label class="sp-range">세로 위치<input type="range" min="0" max="100" step="1" data-crop="y" aria-label="사진 세로 위치"><output data-output="y"></output></label>
+          <label class="sp-range">확대<input type="range" min="1" max="3" step="0.05" data-crop="zoom" aria-label="사진 확대"><output data-output="zoom"></output></label>
+          <div class="sp-preview" aria-label="편집 중인 인물의 대사 미리보기"></div>
+          <div class="sp-toolbar"><button type="button" data-save class="sp-primary">저장</button><button type="button" data-reset-crop>위치 초기화</button><button type="button" data-delete hidden>인물 삭제</button></div>
+        </section>
+        <div class="sp-library-head"><span>등록된 인물 <b data-count></b></span><div class="sp-mask-control"><label class="sp-check"><input type="checkbox" data-hide-portraits> 지정 인물 프사만 가리기</label><small class="sp-muted">새로고침하면 해제</small></div></div>
+        <div class="sp-library"></div>
+      </section>
+
+      <section class="sp-card sp-appearance-card" aria-labelledby="sp-appearance-title">
+        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-appearance-title">대사 디자인</h4><details class="sp-info"><summary aria-label="대사 디자인 설명">!</summary><div class="sp-info-bubble" role="note">사진과 대사 모양을 아래 미리보기로 확인하며 조절할 수 있습니다.</div></details></div></div>
+        <div class="sp-live-preview-wrap"><div class="sp-live-preview-label"><strong>실시간 미리보기</strong></div><div class="sp-live-preview" aria-label="대사 디자인 실시간 미리보기"></div></div>
+        <div class="sp-card-body">
+          <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
+          <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
+          <details class="sp-details"><summary>말풍선 · 테두리 조절</summary><div class="sp-details-body">
+            <div class="sp-bubble-settings" data-bubble-settings hidden>
+              <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-bubble-enabled> 말풍선 배경 직접 설정</label><button type="button" class="sp-reset" data-reset="bubble">기본값으로</button></div>
+              <div class="sp-bubble-settings" data-bubble-fields hidden>
+                <label class="sp-check">배경 색상 <input type="color" data-bubble-color aria-label="말풍선 배경 색상"></label>
+                <label class="sp-range">불투명도<input type="range" min="0" max="100" step="1" data-bubble-opacity aria-label="말풍선 배경 불투명도"><output data-bubble-opacity-output></output></label>
+              </div>
+            </div>
+            <div class="sp-border-settings">
+              <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-border-enabled> 프사 테두리 직접 설정</label><button type="button" class="sp-reset" data-reset="border">기본값으로</button></div>
+              <div class="sp-border-settings" data-border-fields hidden>
+                <label class="sp-check">테두리 색상 <input type="color" data-border-color aria-label="프사 테두리 색상"></label>
+                <label class="sp-range">테두리 굵기<input type="range" min="0" max="6" step="1" data-border-width aria-label="프사 테두리 굵기"><output data-border-width-output></output></label>
+              </div>
+            </div>
+          </div></details>
+          <details class="sp-details"><summary>이름 · 글자 스타일 조절</summary><div class="sp-details-body">
+            <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
+            <label class="sp-field">따옴표 스타일<select data-quote-style><option value="theme">현재 ST 테마 그대로</option><option value="override">덮어쓰기 · 확장 스타일 우선</option></select></label>
+            <label class="sp-field">폰트 적용<select data-font-mode><option value="theme">ST 설정 따르기</option><option value="custom">직접 선택</option></select></label>
+            <div class="sp-font-fields" data-font-fields hidden>
+              <div class="sp-font-row">
+                <label>이름 폰트<select data-name-font>${FONT_OPTIONS.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label>
+                <label>대사 폰트<select data-dialogue-font>${FONT_OPTIONS.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label>
+              </div>
+              <div class="sp-font-row">
+                <label class="sp-font-size">이름 크기<input type="range" data-name-size min="10" max="28" step="1" aria-label="이름 폰트 크기"><output data-name-size-output></output></label>
+                <label class="sp-font-size">대사 크기<input type="range" data-dialogue-size min="12" max="36" step="1" aria-label="대사 폰트 크기"><output data-dialogue-size-output></output></label>
+              </div>
+            </div>
+            <div class="sp-color-rows">
+              <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-color-enabled> 따옴표 “대사” 색상</label><input type="color" data-quote-color aria-label="따옴표 대사 색상 선택"></div>
+              <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-emphasis-enabled> 강조 *글* 색상</label><input type="color" data-emphasis-color aria-label="강조 글 색상 선택"></div>
+              <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-paren-enabled> 괄호 (글) 색상</label><input type="color" data-paren-color aria-label="괄호 글 색상 선택"></div>
+              <div class="sp-toolbar"><button type="button" class="sp-reset" data-reset="colors">글자 색상 기본값으로</button></div>
+            </div>
+          </div></details>
+        </div>
+      </section>
+
+      <section class="sp-card sp-prompt-card" aria-labelledby="sp-prompt-title">
+        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-prompt-title">AI 프롬프트</h4><details class="sp-info"><summary aria-label="AI 프롬프트 설명">!</summary><div class="sp-info-bubble" role="note">켜면 저장된 형식을 다음 AI 요청부터 전달합니다. 지원 표기: 이름 | “대사”, 일본어 성 | 「대사」, 이름 | 『대사』. 저장 전 수정은 A/B를 바꿔도 유지됩니다.</div></details></div><span class="sp-card-dirty" data-prompt-card-dirty hidden></span></div>
+        <details class="sp-details"><summary>프롬프트 보기 · 편집</summary><div class="sp-details-body">
+          <label class="sp-check"><input type="checkbox" data-prompt-enabled> 대사 형식 프롬 적용</label>
+          <div class="sp-prompt-preset-row"><div class="sp-filter-group" role="group" aria-label="프롬프트 선택"><button type="button" data-prompt-preset="A" aria-pressed="true">프롬 A</button><button type="button" data-prompt-preset="B" aria-pressed="false">프롬 B</button></div><span class="sp-prompt-state" data-prompt-state role="status" aria-live="polite"></span></div>
+          <p class="sp-preset-guide"><span><b>A</b> 이름 | "대사"</span><span><b>B</b> 이름 | "대사" (한국어 번역)</span></p>
+          <label class="sp-field">프롬프트<textarea data-prompt-text rows="6" maxlength="8000" aria-label="대사 형식 프롬프트"></textarea></label>
+          <div class="sp-toolbar"><button type="button" data-prompt-save class="sp-primary">이 프롬프트 저장</button><button type="button" data-prompt-reset>기본값으로</button></div>
+        </div></details>
+      </section>
+
+      <section class="sp-card sp-advanced-card" aria-labelledby="sp-advanced-title">
+        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-advanced-title">렌더링 · 백업</h4><details class="sp-info"><summary aria-label="렌더링과 백업 설명">!</summary><div class="sp-info-bubble" role="note">렌더링 최대 깊이 0은 모든 메시지에 적용합니다. 백업 파일에는 공통·봇 전용 인물과 사진이 포함됩니다.</div></details></div></div>
+        <details class="sp-details"><summary>고급 설정 보기</summary><div class="sp-details-body">
+          <label class="sp-field">렌더링 최대 깊이 (0 = 전체)<input type="number" min="0" step="1" inputmode="numeric" data-render-depth></label>
+          <div class="sp-footer"><div class="sp-toolbar"><button type="button" data-export>사진·이름 백업</button><button type="button" data-import>백업 파일 불러오기</button></div></div>
+        </div></details>
+      </section>
+      <input type="file" data-image-file accept="image/png,image/jpeg,image/webp,image/gif" hidden><input type="file" data-backup-file accept="application/json,.json" hidden>
+    </div></div></div>`;
   container.append(panel);
+  panel.addEventListener('click',event=>{
+    for(const info of panel.querySelectorAll('.sp-info[open]'))if(!info.contains(event.target))info.open=false;
+  });
+  panel.addEventListener('keydown',event=>{
+    if(event.key!=='Escape')return;
+    const info=panel.querySelector('.sp-info[open]');
+    if(!info)return;
+    info.open=false;info.querySelector('summary').focus({preventScroll:true});event.stopPropagation();
+  });
   panel.querySelector('[data-hide-portraits]').onchange=event=>{
     portraitsHidden=event.target.checked;
     if(timer!==null)cancelAnimationFrame(timer);needsReset=true;renderChat();
   };
   panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;
+  panel.querySelector('[data-prompt-text]').oninput=recordPromptDraft;
   panel.querySelector('[data-prompt-enabled]').onchange=async event=>{
     if(event.target.checked&&typeof ctx().setExtensionPrompt!=='function'){
       event.target.checked=false;message('이 ST 환경에서는 프롬프트 삽입 기능을 사용할 수 없어요.',true);return;
     }
-    try{const enabled=event.target.checked;await persist(current=>({...current,dialoguePromptEnabled:enabled}));message('');}
+    try{const enabled=event.target.checked;await persist(current=>({...current,dialoguePromptEnabled:enabled}),[],true,true);message('');}
     catch(error){message(error.message,true);refreshUI();}
   };
   for(const button of panel.querySelectorAll('[data-prompt-preset]'))button.onclick=async()=>{
     const preset=button.dataset.promptPreset;
+    if(promptBusy||preset===store.dialoguePromptPreset)return;
+    recordPromptDraft();
+    setPromptBusy(true);
     try{
-      await persist(current=>({...current,dialoguePromptPreset:preset}));
-      panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;
-      message('');
+      await persist(current=>({...current,dialoguePromptPreset:preset}),[],true,true);
+      panel.querySelector('[data-prompt-text]').value=promptDrafts.get(preset)??store.dialoguePrompt;
+      promptState();message('');
     }catch(error){message(error.message,true);}
+    finally{setPromptBusy(false);}
   };
   panel.querySelector('[data-prompt-save]').onclick=async()=>{
+    if(promptBusy)return;
+    recordPromptDraft();
     const value=panel.querySelector('[data-prompt-text]').value;
     const preset=store.dialoguePromptPreset;
-    try{await persist(current=>({...current,dialoguePrompts:{...current.dialoguePrompts,[preset]:value}}));message(`프롬${preset}에 저장했어요.`);}
-    catch(error){message(error.message,true);}
+    setPromptBusy(true);
+    try{
+      await persist(current=>({...current,dialoguePrompts:{...current.dialoguePrompts,[preset]:value}}),[],true,true);
+      promptDrafts.delete(preset);promptState();message(`프롬${preset}에 저장했어요.`);
+    }catch(error){message(error.message,true);}
+    finally{setPromptBusy(false);}
   };
   panel.querySelector('[data-prompt-reset]').onclick=async()=>{
+    if(promptBusy)return;
+    recordPromptDraft();
     const preset=store.dialoguePromptPreset,value=preset==='B'?DEFAULT_DIALOGUE_PROMPT_B:DEFAULT_DIALOGUE_PROMPT;
-    try{await persist(current=>({...current,dialoguePrompts:{...current.dialoguePrompts,[preset]:value}}));panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;message('');}
-    catch(error){message(error.message,true);}
+    if(promptDrafts.has(preset)&&!confirm(`프롬${preset}의 저장 전 수정 내용을 버리고 기본값으로 되돌릴까요?`))return;
+    setPromptBusy(true);
+    try{
+      await persist(current=>({...current,dialoguePrompts:{...current.dialoguePrompts,[preset]:value}}),[],true,true);
+      promptDrafts.delete(preset);panel.querySelector('[data-prompt-text]').value=store.dialoguePrompt;
+      promptState();message(`프롬${preset}을 기본값으로 되돌렸어요.`);
+    }catch(error){message(error.message,true);}
+    finally{setPromptBusy(false);}
   };
   const header=panel.querySelector('.inline-drawer-header'),content=panel.querySelector('.inline-drawer-content');
   header.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();header.click();}});
@@ -537,23 +700,34 @@ function mount(){
     ['[data-border-enabled]','borderEnabled',true],['[data-border-color]','borderColor'],['[data-border-width]','borderWidth'],
   ])panel.querySelector(selector).addEventListener('change',async event=>{
     const value=isBoolean?event.target.checked:['size','nameFontSize','dialogueFontSize','renderDepth','bubbleOpacity','borderWidth'].includes(key)?Number(event.target.value):event.target.value;
-    try{await persist(current=>({...current,[key]:value}),[],key!=='renderDepth');message('');}
+    try{await persist(current=>({...current,[key]:value}),[],key!=='renderDepth',true);message('');}
     catch(error){message(error.message,true);refreshUI();}
   });
-  panel.querySelector('[data-bubble-opacity]').oninput=event=>{panel.querySelector('[data-bubble-opacity-output]').textContent=event.target.value+'%';};
-  panel.querySelector('[data-border-width]').oninput=event=>{panel.querySelector('[data-border-width-output]').textContent=event.target.value+'px';};
+  panel.querySelector('[data-bubble-opacity]').oninput=event=>{
+    panel.querySelector('[data-bubble-opacity-output]').textContent=event.target.value+'%';
+    livePreview({...store,bubbleOpacity:Number(event.target.value)},true);
+  };
+  panel.querySelector('[data-border-width]').oninput=event=>{
+    panel.querySelector('[data-border-width-output]').textContent=event.target.value+'px';
+    livePreview({...store,borderWidth:Number(event.target.value)},true);
+  };
   for(const button of panel.querySelectorAll('[data-reset]'))button.onclick=async()=>{
     const keys=RESET_GROUPS[button.dataset.reset];
     try{
-      await persist(current=>({...current,...Object.fromEntries(keys.map(key=>[key,DEFAULT_SETTINGS[key]]))}));
+      await persist(current=>({...current,...Object.fromEntries(keys.map(key=>[key,DEFAULT_SETTINGS[key]]))}),[],true,true);
       message('기본값으로 되돌렸어요.');
     }catch(error){message(error.message,true);refreshUI();}
   };
-  panel.querySelector('[data-size]').oninput=event=>{panel.querySelector('[data-size-output]').textContent=`${event.target.value}px`;};
+  panel.querySelector('[data-size]').oninput=event=>{
+    panel.querySelector('[data-size-output]').textContent=`${event.target.value}px`;
+    livePreview({...store,size:Number(event.target.value)},true);
+  };
   for(const key of ['name','dialogue'])panel.querySelector(`[data-${key}-size]`).oninput=event=>{
     panel.querySelector(`[data-${key}-size-output]`).textContent=event.target.value+'px';
+    livePreview({...store,[`${key}FontSize`]:Number(event.target.value)},true);
   };
   panel.querySelector('[data-search]').oninput=library;
+  for(const button of panel.querySelectorAll('[data-scope-filter]'))button.onclick=()=>selectScopeFilter(button.dataset.scopeFilter);
   panel.querySelector('[data-add]').onclick=()=>editPerson();
   panel.querySelector('[data-cancel]').onclick=closeEditor;
   panel.querySelector('[data-person-scope]').onchange=scopeHint;
@@ -566,18 +740,18 @@ function mount(){
   panel.querySelector('[data-upload]').onclick=()=>panel.querySelector('[data-image-file]').click();
   panel.querySelector('[data-image-file]').onchange=async event=>{
     const editing=draft;
-    try{const image=await readImage(event.target.files[0]);if(image&&draft===editing){draft.image=image;delete draft.photoSource;preview();message('사진을 불러왔어요. 저장하면 대사에 적용됩니다.');}}
+    try{const image=await readImage(event.target.files[0]);if(image&&draft===editing){draft.image=image;delete draft.photoSource;preview();message('');}}
     catch(error){message(error.message,true);}finally{event.target.value='';}
   };
   panel.querySelector('[data-source]').onchange=()=>{
     if(!draft)return;
     const value=panel.querySelector('[data-source]').value;
-    if(!value){delete draft.photoSource;draft.image='';preview();message('ST 사진 연결을 해제했어요. 사진을 직접 넣거나 다시 골라 주세요.');return;}
+    if(!value){delete draft.photoSource;draft.image='';preview();message('');return;}
     const colon=value.indexOf(':'),type=value.slice(0,colon),id=value.slice(colon+1);
     const source=type==='character'?ctx().characters[Number(id)]?.avatar:id;
     if(!source)return;
     draft.photoSource={type:type==='character'?'avatar':'persona',file:source};draft.image='';
-    preview();message('ST 원본 사진을 연결했어요. 저장을 눌러 주세요.');
+    preview();message('');
   };
   panel.querySelector('[data-delete]').onclick=async()=>{
     if(!draft||!original||!confirm(`“${draft.name}”의 이 범위 등록을 삭제할까요?`))return;
