@@ -1,11 +1,11 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.2.3';
-import { syncDialoguePrompt } from './prompt.js?v=1.2.3';
-import { createRenderer, makeAvatar, applyCrop, decorateLine, resetQuotes } from './renderer.js?v=1.2.3';
-import { createChatRenderer } from './chat-renderer.js?v=1.2.3';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.2.3';
-import { bindCropDrag } from './crop.js?v=1.2.3';
-import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.2.3';
-import {uploadPortrait,portableImage,portableSourceGif} from './server-images.js?v=1.2.3';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.2.4';
+import { syncDialoguePrompt } from './prompt.js?v=1.2.4';
+import { createRenderer, makeAvatar, applyCrop, decorateLine, resetQuotes } from './renderer.js?v=1.2.4';
+import { createChatRenderer } from './chat-renderer.js?v=1.2.4';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.2.4';
+import { bindCropDrag } from './crop.js?v=1.2.4';
+import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.2.4';
+import {uploadPortrait,portableImage,portableSourceGif} from './server-images.js?v=1.2.4';
 
 // Keep the v1 storage key and profile IDs so existing names and photos survive upgrades.
 const KEY='speaker_portraits_v1';
@@ -684,8 +684,13 @@ function mount(){
   };
   const header=panel.querySelector('.inline-drawer-header'),content=panel.querySelector('.inline-drawer-content');
   header.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();header.click();}});
-  new MutationObserver(()=>header.setAttribute('aria-expanded',String(getComputedStyle(content).display!=='none')))
-    .observe(content,{attributes:true,attributeFilter:['style','class']});
+  // ST slides the drawer by rewriting its inline style every frame. Reading the computed style here
+  // forced a full style recalc on each of those frames, so trust the inline display ST sets instead.
+  let expanded=null;
+  new MutationObserver(()=>{
+    const open=content.style.display?content.style.display!=='none':getComputedStyle(content).display!=='none';
+    if(open!==expanded){expanded=open;header.setAttribute('aria-expanded',String(open));}
+  }).observe(content,{attributes:true,attributeFilter:['style','class']});
   for(const [selector,key,isBoolean] of [
     ['[data-enabled]','enabled',true],
     ['[data-render-depth]','renderDepth'],

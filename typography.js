@@ -1,4 +1,4 @@
-import {parseDialogueLine} from './core.js?v=1.2.3';
+import {parseDialogueLine} from './core.js?v=1.2.4';
 
 // Private family names avoid redefining fonts registered by other extensions.
 export const FONT_OPTIONS=Object.freeze([

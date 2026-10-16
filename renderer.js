@@ -1,5 +1,5 @@
-import { parseDialogueLine, resolveSpeaker, dialoguePrefix, normalizeName } from './core.js?v=1.2.3';
-import { applyTypography } from './typography.js?v=1.2.3';
+import { parseDialogueLine, resolveSpeaker, dialoguePrefix, normalizeName } from './core.js?v=1.2.4';
+import { applyTypography } from './typography.js?v=1.2.4';
 
 const EXCLUDED='pre,code,style,script,textarea,iframe,svg,table,details,.mg-status,.speakers,.sp-line,[data-sp-skip]';
 const INLINE=new Set(['A','ABBR','B','BDI','BDO','CITE','DEL','EM','I','MARK','Q','S','SMALL','SPAN','STRONG','SUB','SUP','U']);
