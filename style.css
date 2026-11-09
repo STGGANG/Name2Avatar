@@ -15,6 +15,7 @@
 .sp-settings {
   width: 100%;
   min-width: 0;
+  container: sp-settings / inline-size;
 }
 
 .sp-settings [hidden] { display: none !important; }
@@ -32,6 +33,8 @@
   --sp-soft-strong: color-mix(in srgb, var(--sp-text) 9%, transparent);
   --sp-accent-soft: color-mix(in srgb, var(--sp-accent) 13%, transparent);
   --sp-accent-line: color-mix(in srgb, var(--sp-accent) 32%, transparent);
+  --sp-accent-text: color-mix(in srgb, var(--sp-accent) 78%, var(--sp-text));
+  --sp-faint: color-mix(in srgb, var(--sp-text) 44%, transparent);
   --sp-control: color-mix(in srgb, var(--sp-bg) 92%, var(--sp-text) 8%);
   display: grid;
   gap: 13px;
@@ -127,38 +130,96 @@
   gap: 6px;
   min-width: 0;
 }
-.sp-info { position: relative; flex: none; }
-.sp-info > summary {
+.sp-card-head { position: relative; }
+
+.sp-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: grid;
-  place-items: center;
-  width: 17px;
-  height: 17px;
-  border: 1px solid var(--sp-line-strong);
-  border-radius: 50%;
-  color: var(--sp-muted);
-  font-size: 11px;
-  font-weight: 750;
-  line-height: 1;
-  list-style: none;
-  cursor: pointer;
-}
-.sp-info > summary::-webkit-details-marker { display: none; }
-.sp-info[open] > summary,
-.sp-info > summary:hover { border-color: var(--sp-accent-line); background: var(--sp-accent-soft); color: var(--sp-text); }
-.sp-info-bubble {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 8px);
-  left: 0;
-  width: min(240px, calc(100vw - 56px));
-  padding: 10px 11px;
-  border: 1px solid var(--sp-line-strong);
-  border-radius: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--sp-line);
+  border-radius: 14px;
   background: var(--sp-bg);
-  color: var(--sp-text);
+}
+.sp-settings .sp-tabs button.sp-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  height: 48px;
+  margin: 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--sp-muted);
+  font: inherit;
   font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.sp-settings .sp-tabs button.sp-tab i { font-size: 1.25em; }
+.sp-settings .sp-tabs button.sp-tab span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-settings .sp-tabs button.sp-tab:hover { background: var(--sp-soft-strong); color: var(--sp-text); }
+.sp-settings .sp-tabs button.sp-tab[aria-selected="true"] { background: var(--sp-accent-soft); color: var(--sp-accent-text); font-weight: 700; }
+.sp-settings .sp-tabs button.sp-tab:focus-visible { outline: 2px solid var(--sp-accent-line); outline-offset: -2px; }
+.sp-tab-panel { display: grid; gap: 13px; min-width: 0; }
+@container sp-settings (min-width: 520px) {
+  .sp-settings .sp-tabs button.sp-tab { flex-direction: row; gap: 7px; height: 40px; font-size: 12px; }
+  .sp-settings .sp-tabs button.sp-tab i { font-size: 1em; }
+}
+@container sp-settings (max-width: 280px) {
+  .sp-settings .sp-tabs button.sp-tab > span { display: none; }
+}
+
+.sp-settings .sp-title-row button.sp-help-button {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: -3px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--sp-faint);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color .15s ease, background-color .15s ease;
+}
+.sp-settings .sp-title-row button.sp-help-button::after { content: ""; position: absolute; inset: -9px; }
+.sp-settings .sp-title-row button.sp-help-button i { margin: 0; }
+.sp-settings .sp-title-row button.sp-help-button:hover,
+.sp-settings .sp-title-row button.sp-help-button[aria-expanded="true"] { background: var(--sp-accent-soft); color: var(--sp-accent-text); }
+.sp-help-content {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  padding: 10px 12px;
+  border: 1px solid var(--sp-accent-line);
+  border-radius: 12px;
+  background: var(--sp-bg);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--SmartThemeShadowColor, #000) 55%, transparent) !important;
+  color: var(--sp-text);
+  font-size: 12px;
   font-weight: 400;
-  line-height: 1.5;
+  line-height: 1.6;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 .sp-card-head .sp-muted { white-space: nowrap; }
 .sp-card-dirty {
@@ -600,3 +661,4 @@
   .sp-details > summary::after,
   .sp-font-settings > summary::after { transition: none; }
 }
+.sp-settings .sp-divider { margin: 2px 0; border: 0; border-top: 1px solid var(--sp-line); }

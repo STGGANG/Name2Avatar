@@ -1,11 +1,12 @@
-import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.2.4';
-import { syncDialoguePrompt } from './prompt.js?v=1.2.4';
-import { createRenderer, makeAvatar, applyCrop, decorateLine, resetQuotes } from './renderer.js?v=1.2.4';
-import { createChatRenderer } from './chat-renderer.js?v=1.2.4';
-import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.2.4';
-import { bindCropDrag } from './crop.js?v=1.2.4';
-import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.2.4';
-import {uploadPortrait,portableImage,portableSourceGif} from './server-images.js?v=1.2.4';
+import { DEFAULT_SETTINGS, DEFAULT_DIALOGUE_PROMPT, DEFAULT_DIALOGUE_PROMPT_B, normalizeName, parseNames, isServerImage } from './core.js?v=1.3.0';
+import { syncDialoguePrompt } from './prompt.js?v=1.3.0';
+import { createRenderer, makeAvatar, applyCrop, decorateLine, resetQuotes } from './renderer.js?v=1.3.0';
+import { createChatRenderer } from './chat-renderer.js?v=1.3.0';
+import { sanitizeStore, getActiveScope, allProfiles, savePerson, removePerson } from './scopes.js?v=1.3.0';
+import { bindCropDrag } from './crop.js?v=1.3.0';
+import { FONT_OPTIONS, applyTypography } from './typography.js?v=1.3.0';
+import {uploadPortrait,portableImage,portableSourceGif} from './server-images.js?v=1.3.0';
+import { installTabs, installHelp } from './settings-ui.js?v=1.3.0';
 
 // Keep the v1 storage key and profile IDs so existing names and photos survive upgrades.
 const KEY='speaker_portraits_v1';
@@ -508,11 +509,22 @@ const RESET_GROUPS={
   colors:['quoteColorEnabled','quoteColor','emphasisColorEnabled','emphasisColor','parenColorEnabled','parenColor'],
   border:['borderEnabled','borderColor','borderWidth'],
 };
+const TABS=[['people','fa-users','인물'],['design','fa-palette','디자인'],['prompt','fa-file-lines','프롬프트'],['advanced','fa-sliders','백업·고급']];
+const help=(id,label,text)=>`<button type="button" class="sp-help-button" data-help="sp-help-${id}" aria-controls="sp-help-${id}" aria-expanded="false" aria-label="${label} 도움말"><i class="fa-solid fa-circle-info" aria-hidden="true"></i></button><p id="sp-help-${id}" class="sp-help-content" role="note" hidden>${text}</p>`;
+const settingsContainer=()=>document.querySelector('#extensions_settings2')??document.querySelector('#extensions_settings');
+let panelSlot=null;
+// Join the extensions list in load order like other extensions; the contents arrive once photos are loaded.
+function placePanel(){
+  const container=settingsContainer();
+  if(!container||panelSlot)return;
+  panelSlot=Object.assign(document.createElement('div'),{className:'sp-settings',id:'speaker-portraits-settings'});
+  container.append(panelSlot);
+}
 function mount(){
   if(panel)return;
-  const container=document.querySelector('#extensions_settings2')??document.querySelector('#extensions_settings');
-  if(!container)return;
-  panel=document.createElement('div');panel.className='sp-settings';panel.id='speaker-portraits-settings';
+  const container=settingsContainer();
+  if(!container&&!panelSlot)return;
+  panel=panelSlot??Object.assign(document.createElement('div'),{className:'sp-settings',id:'speaker-portraits-settings'});
   panel.innerHTML=`<div class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header" role="button" tabindex="0" aria-expanded="false" aria-controls="sp-drawer-content"><b>이름 ▸ 프사</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></div></div>
     <div class="inline-drawer-content" id="sp-drawer-content"><div class="sp-panel">
@@ -521,10 +533,12 @@ function mount(){
         <div class="sp-hero-actions"><span class="sp-hero-status">현재 목록 <b data-total-count>0</b>명</span><label class="sp-check sp-hero-toggle"><input type="checkbox" data-enabled> 사용</label></div>
       </header>
       <p class="sp-message" role="status" aria-live="polite"></p>
+      <nav class="sp-tabs" role="tablist" aria-label="이름 ▸ 프사 설정">${TABS.map(([key,icon,label],index)=>`<button type="button" class="sp-tab" role="tab" data-tab="${key}" id="sp-tab-${key}" aria-controls="sp-panel-${key}" aria-selected="${index===0}"${index?' tabindex="-1"':''}><i class="fa-solid ${icon}" aria-hidden="true"></i><span>${label}</span></button>`).join('')}</nav>
 
+      <div class="sp-tab-panel" data-tab="people" id="sp-panel-people" role="tabpanel" aria-labelledby="sp-tab-people">
       <section class="sp-card sp-people-card" aria-labelledby="sp-people-title">
         <div class="sp-card-head">
-          <div class="sp-title-row"><h4 id="sp-people-title">인물 관리</h4><details class="sp-info"><summary aria-label="인물 관리 설명">!</summary><div class="sp-info-bubble" role="note">대사 앞의 이름을 등록한 사진에 연결합니다. 현재 봇 전용 등록은 같은 이름의 공통 등록보다 우선합니다.</div></details></div>
+          <div class="sp-title-row"><h4 id="sp-people-title">인물 관리</h4>${help('people','인물 관리','대사 앞의 이름을 등록한 사진에 연결합니다. 현재 봇 전용 등록은 같은 이름의 공통 등록보다 우선합니다.')}</div>
           <button type="button" data-add class="sp-primary">＋ 인물 추가</button>
         </div>
         <div class="sp-toolbar sp-people-controls">
@@ -555,14 +569,17 @@ function mount(){
         <div class="sp-library-head"><span>등록된 인물 <b data-count></b></span><div class="sp-mask-control"><label class="sp-check"><input type="checkbox" data-hide-portraits> 지정 인물 프사만 가리기</label><small class="sp-muted">새로고침하면 해제</small></div></div>
         <div class="sp-library"></div>
       </section>
+      </div>
 
+      <div class="sp-tab-panel" data-tab="design" id="sp-panel-design" role="tabpanel" aria-labelledby="sp-tab-design">
       <section class="sp-card sp-appearance-card" aria-labelledby="sp-appearance-title">
-        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-appearance-title">대사 디자인</h4><details class="sp-info"><summary aria-label="대사 디자인 설명">!</summary><div class="sp-info-bubble" role="note">사진과 대사 모양을 아래 미리보기로 확인하며 조절할 수 있습니다.</div></details></div></div>
+        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-appearance-title">대사 디자인</h4>${help('design','대사 디자인','사진과 대사 모양을 아래 미리보기로 확인하며 조절할 수 있습니다.')}</div></div>
         <div class="sp-live-preview-wrap"><div class="sp-live-preview-label"><strong>실시간 미리보기</strong></div><div class="sp-live-preview" aria-label="대사 디자인 실시간 미리보기"></div></div>
         <div class="sp-card-body">
           <div class="sp-options"><label>대사 디자인<select data-design><option value="minimal">미니멀</option><option value="bubble">말풍선</option></select></label><label>사진 모양<select data-shape><option value="circle">원형</option><option value="rounded">둥근 사각형</option></select></label></div>
           <label class="sp-range">사진 크기<input type="range" min="32" max="88" step="2" data-size aria-label="사진 크기"><output data-size-output></output></label>
-          <details class="sp-details"><summary>말풍선 · 테두리 조절</summary><div class="sp-details-body">
+          <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
+          <details class="sp-details"><summary>말풍선 · 글자 스타일 조절</summary><div class="sp-details-body">
             <div class="sp-bubble-settings" data-bubble-settings hidden>
               <div class="sp-toolbar"><label class="sp-check"><input type="checkbox" data-bubble-enabled> 말풍선 배경 직접 설정</label><button type="button" class="sp-reset" data-reset="bubble">기본값으로</button></div>
               <div class="sp-bubble-settings" data-bubble-fields hidden>
@@ -577,9 +594,7 @@ function mount(){
                 <label class="sp-range">테두리 굵기<input type="range" min="0" max="6" step="1" data-border-width aria-label="프사 테두리 굵기"><output data-border-width-output></output></label>
               </div>
             </div>
-          </div></details>
-          <details class="sp-details"><summary>이름 · 글자 스타일 조절</summary><div class="sp-details-body">
-            <label class="sp-field">이름 위치<select data-name-position><option value="none">이름 표시 안하기</option><option value="above">대사 위 표시</option></select></label>
+            <hr class="sp-divider">
             <label class="sp-field">따옴표 스타일<select data-quote-style><option value="theme">현재 ST 테마 그대로</option><option value="override">덮어쓰기 · 확장 스타일 우선</option></select></label>
             <label class="sp-field">폰트 적용<select data-font-mode><option value="theme">ST 설정 따르기</option><option value="custom">직접 선택</option></select></label>
             <div class="sp-font-fields" data-font-fields hidden>
@@ -601,37 +616,34 @@ function mount(){
           </div></details>
         </div>
       </section>
+      </div>
 
+      <div class="sp-tab-panel" data-tab="prompt" id="sp-panel-prompt" role="tabpanel" aria-labelledby="sp-tab-prompt">
       <section class="sp-card sp-prompt-card" aria-labelledby="sp-prompt-title">
-        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-prompt-title">AI 프롬프트</h4><details class="sp-info"><summary aria-label="AI 프롬프트 설명">!</summary><div class="sp-info-bubble" role="note">켜면 저장된 형식을 다음 AI 요청부터 전달합니다. 지원 표기: 이름 | “대사”, 일본어 성 | 「대사」, 이름 | 『대사』. 저장 전 수정은 A/B를 바꿔도 유지됩니다.</div></details></div><span class="sp-card-dirty" data-prompt-card-dirty hidden></span></div>
-        <details class="sp-details"><summary>프롬프트 보기 · 편집</summary><div class="sp-details-body">
+        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-prompt-title">AI 프롬프트</h4>${help('prompt','AI 프롬프트','켜면 저장된 형식을 다음 AI 요청부터 전달합니다. 지원 표기: 이름 | “대사”, 일본어 성 | 「대사」, 이름 | 『대사』. 저장 전 수정은 A/B를 바꿔도 유지됩니다.')}</div><span class="sp-card-dirty" data-prompt-card-dirty hidden></span></div>
+        <div class="sp-card-body">
           <label class="sp-check"><input type="checkbox" data-prompt-enabled> 대사 형식 프롬 적용</label>
           <div class="sp-prompt-preset-row"><div class="sp-filter-group" role="group" aria-label="프롬프트 선택"><button type="button" data-prompt-preset="A" aria-pressed="true">프롬 A</button><button type="button" data-prompt-preset="B" aria-pressed="false">프롬 B</button></div><span class="sp-prompt-state" data-prompt-state role="status" aria-live="polite"></span></div>
           <p class="sp-preset-guide"><span><b>A</b> 이름 | "대사"</span><span><b>B</b> 이름 | "대사" (한국어 번역)</span></p>
           <label class="sp-field">프롬프트<textarea data-prompt-text rows="6" maxlength="8000" aria-label="대사 형식 프롬프트"></textarea></label>
           <div class="sp-toolbar"><button type="button" data-prompt-save class="sp-primary">이 프롬프트 저장</button><button type="button" data-prompt-reset>기본값으로</button></div>
-        </div></details>
+        </div>
       </section>
+      </div>
 
+      <div class="sp-tab-panel" data-tab="advanced" id="sp-panel-advanced" role="tabpanel" aria-labelledby="sp-tab-advanced">
       <section class="sp-card sp-advanced-card" aria-labelledby="sp-advanced-title">
-        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-advanced-title">렌더링 · 백업</h4><details class="sp-info"><summary aria-label="렌더링과 백업 설명">!</summary><div class="sp-info-bubble" role="note">렌더링 최대 깊이 0은 모든 메시지에 적용합니다. 백업 파일에는 공통·봇 전용 인물과 사진이 포함됩니다.</div></details></div></div>
-        <details class="sp-details"><summary>고급 설정 보기</summary><div class="sp-details-body">
+        <div class="sp-card-head"><div class="sp-title-row"><h4 id="sp-advanced-title">렌더링 · 백업</h4>${help('advanced','렌더링과 백업','렌더링 최대 깊이 0은 모든 메시지에 적용합니다. 백업 파일에는 공통·봇 전용 인물과 사진이 포함됩니다.')}</div></div>
+        <div class="sp-card-body">
           <label class="sp-field">렌더링 최대 깊이 (0 = 전체)<input type="number" min="0" step="1" inputmode="numeric" data-render-depth></label>
           <div class="sp-footer"><div class="sp-toolbar"><button type="button" data-export>사진·이름 백업</button><button type="button" data-import>백업 파일 불러오기</button></div></div>
-        </div></details>
+        </div>
       </section>
+      </div>
       <input type="file" data-image-file accept="image/png,image/jpeg,image/webp,image/gif" hidden><input type="file" data-backup-file accept="application/json,.json" hidden>
     </div></div></div>`;
-  container.append(panel);
-  panel.addEventListener('click',event=>{
-    for(const info of panel.querySelectorAll('.sp-info[open]'))if(!info.contains(event.target))info.open=false;
-  });
-  panel.addEventListener('keydown',event=>{
-    if(event.key!=='Escape')return;
-    const info=panel.querySelector('.sp-info[open]');
-    if(!info)return;
-    info.open=false;info.querySelector('summary').focus({preventScroll:true});event.stopPropagation();
-  });
+  if(!panel.isConnected)container.append(panel);
+  installTabs(panel);installHelp(panel);
   panel.querySelector('[data-hide-portraits]').onchange=event=>{
     portraitsHidden=event.target.checked;
     if(timer!==null)cancelAnimationFrame(timer);needsReset=true;renderChat();
@@ -774,6 +786,7 @@ async function initialize(){
   const raw=ctx().extensionSettings[KEY]??DEFAULT_SETTINGS;
   storageId=typeof raw.storageId==='string'?raw.storageId:uid();
   store=sanitizeStore(raw);activeScope=getActiveScope(ctx());let storageError='';
+  placePanel();
   try{
     const images=await imageStore();
     for(const person of allProfiles(store))person.image=person.photoSource?'':isServerImage(person.image)?person.image:(images[person.id]??person.image??'');
